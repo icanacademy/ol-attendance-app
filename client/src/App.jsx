@@ -16,14 +16,14 @@ function App() {
   const [adminPassword, setAdminPassword] = useState(null);
   const [selectedTeacher, setSelectedTeacher] = useState(''); // Teacher filter
 
-  // Fetch students
+  // Fetch students (with year/month for date-aware hidden row filtering)
   const {
     data: students = [],
     isLoading: studentsLoading,
     error: studentsError
   } = useQuery({
-    queryKey: ['students'],
-    queryFn: getStudents
+    queryKey: ['students', selectedYear, selectedMonth],
+    queryFn: () => getStudents(selectedYear, selectedMonth)
   });
 
   // Fetch attendance for selected month

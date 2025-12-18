@@ -1,9 +1,14 @@
 const Attendance = require('../models/Attendance');
 
 // Get all students with classes
+// Accepts optional year and month query params for date-aware hidden row filtering
 exports.getStudents = async (req, res) => {
   try {
-    const students = await Attendance.getStudentsWithClasses();
+    const { year, month } = req.query;
+    const students = await Attendance.getStudentsWithClasses(
+      year ? parseInt(year) : null,
+      month ? parseInt(month) : null
+    );
     res.json(students);
   } catch (error) {
     console.error('Error fetching students:', error);
@@ -616,5 +621,57 @@ exports.deleteStudentSubject = async (req, res) => {
   } catch (error) {
     console.error('Error deleting student subject:', error);
     res.status(500).json({ error: 'Failed to delete student subject' });
+  }
+};
+
+// ==================== HIDDEN ROWS ENDPOINTS ====================
+
+// Get all hidden rows
+exports.getHiddenRows = async (req, res) => {
+  try {
+    const hiddenRows = await Attendance.getHiddenRows();
+    res.json(hiddenRows);
+  } catch (error) {
+    console.error('Error fetching hidden rows:', error);
+    res.status(500).json({ error: 'Failed to fetch hidden rows' });
+  }
+};
+
+// Hide a student row (student-subject combination) from a specific month onwards
+exports.hideRow = async (req, res) => {
+  try {
+    const { studentId, subject, year, month } = req.body;
+
+    if (!studentId) {
+      return res.status(400).json({ error: 'studentId is required' });
+    }
+
+    const result = await Attendance.hideRow(
+      parseInt(studentId),
+      subject || null,
+      year ? parseInt(year) : null,
+      month ? parseInt(month) : null
+    );
+    res.json(result || { message: 'Row hidden successfully' });
+  } catch (error) {
+    console.error('Error hiding row:', error);
+    res.status(500).json({ error: 'Failed to hide row' });
+  }
+};
+
+// Unhide a student row
+exports.unhideRow = async (req, res) => {
+  try {
+    const { studentId, subject } = req.body;
+
+    if (!studentId) {
+      return res.status(400).json({ error: 'studentId is required' });
+    }
+
+    const result = await Attendance.unhideRow(parseInt(studentId), subject || null);
+    res.json(result || { message: 'Row unhidden successfully' });
+  } catch (error) {
+    console.error('Error unhiding row:', error);
+    res.status(500).json({ error: 'Failed to unhide row' });
   }
 };

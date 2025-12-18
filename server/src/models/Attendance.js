@@ -7,7 +7,8 @@ const SCHEDULER_API_URL = process.env.SCHEDULER_API_URL || 'http://localhost:448
 class Attendance {
   // Get all students from the online scheduler API with their primary teacher from database
   // Returns one row per student-subject combination (students with multiple subjects get multiple rows)
-  static async getStudentsWithClasses() {
+  // If year and month are provided, filters hidden rows based on hidden_from date
+  static async getStudentsWithClasses(year = null, month = null) {
     try {
       // Fetch students from online scheduler API
       const studentsResponse = await axios.get(`${SCHEDULER_API_URL}/students/all-unique`);
@@ -129,8 +130,40 @@ class Attendance {
           }
         });
 
+      // Get hidden rows to filter them out
+      let hiddenRows = [];
+      try {
+        const hiddenResult = await pool.query('SELECT student_id, subject, hidden_from_year, hidden_from_month FROM hidden_attendance_rows');
+        hiddenRows = hiddenResult.rows;
+      } catch (err) {
+        console.log('Could not fetch hidden rows (table may not exist yet):', err.message);
+      }
+
+      // Filter out hidden rows based on date
+      // If year/month provided, only hide if hidden_from date <= current view date
+      const filteredResult = result.filter(student => {
+        const isHidden = hiddenRows.some(hidden => {
+          // Check if this hidden row matches the student
+          const matchesStudent = hidden.student_id === student.id &&
+            (hidden.subject === student.subject || (hidden.subject === null && student.subject === null));
+
+          if (!matchesStudent) return false;
+
+          // If no year/month provided or no hidden_from date, use legacy behavior (always hidden)
+          if (!year || !month || !hidden.hidden_from_year || !hidden.hidden_from_month) {
+            return true;
+          }
+
+          // Compare dates: hide only if current view is >= hidden_from date
+          const viewDate = year * 12 + month;
+          const hiddenFromDate = hidden.hidden_from_year * 12 + hidden.hidden_from_month;
+          return viewDate >= hiddenFromDate;
+        });
+        return !isHidden;
+      });
+
       // Sort by name then subject
-      return result.sort((a, b) => {
+      return filteredResult.sort((a, b) => {
         const nameCompare = a.name.localeCompare(b.name);
         if (nameCompare !== 0) return nameCompare;
         return (a.subject || '').localeCompare(b.subject || '');
@@ -980,6 +1013,61 @@ class Attendance {
       console.error('Error fetching students with subject tuition:', error.message);
       throw error;
     }
+  }
+
+  // ==================== HIDDEN ROWS METHODS ====================
+
+  // Get all hidden rows
+  static async getHiddenRows() {
+    const query = `
+      SELECT id, student_id, subject, hidden_at, hidden_from_year, hidden_from_month
+      FROM hidden_attendance_rows
+      ORDER BY hidden_from_year DESC, hidden_from_month DESC, hidden_at DESC
+    `;
+    const result = await pool.query(query);
+    return result.rows;
+  }
+
+  // Hide a student row (student-subject combination) from a specific month onwards
+  static async hideRow(studentId, subject = null, year = null, month = null) {
+    // If year/month not provided, use current date
+    const now = new Date();
+    const hiddenFromYear = year || now.getFullYear();
+    const hiddenFromMonth = month || (now.getMonth() + 1);
+
+    const query = `
+      INSERT INTO hidden_attendance_rows (student_id, subject, hidden_from_year, hidden_from_month)
+      VALUES ($1, $2, $3, $4)
+      ON CONFLICT (student_id, subject)
+      DO UPDATE SET
+        hidden_from_year = EXCLUDED.hidden_from_year,
+        hidden_from_month = EXCLUDED.hidden_from_month,
+        hidden_at = CURRENT_TIMESTAMP
+      RETURNING *, hidden_from_year, hidden_from_month
+    `;
+    const result = await pool.query(query, [studentId, subject, hiddenFromYear, hiddenFromMonth]);
+    return result.rows[0];
+  }
+
+  // Unhide a student row
+  static async unhideRow(studentId, subject = null) {
+    const query = `
+      DELETE FROM hidden_attendance_rows
+      WHERE student_id = $1 AND (subject = $2 OR (subject IS NULL AND $2 IS NULL))
+      RETURNING *
+    `;
+    const result = await pool.query(query, [studentId, subject]);
+    return result.rows[0];
+  }
+
+  // Check if a row is hidden
+  static async isRowHidden(studentId, subject = null) {
+    const query = `
+      SELECT id FROM hidden_attendance_rows
+      WHERE student_id = $1 AND (subject = $2 OR (subject IS NULL AND $2 IS NULL))
+    `;
+    const result = await pool.query(query, [studentId, subject]);
+    return result.rows.length > 0;
   }
 }
 

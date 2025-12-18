@@ -67,4 +67,9 @@ router.get('/commission', attendanceController.getTeachersWithCommission);
 router.post('/commission', attendanceController.setTeacherCommission);
 router.post('/commission/payment/toggle', attendanceController.toggleTeacherPayment);
 
+// Hidden rows routes
+router.get('/hidden', attendanceController.getHiddenRows);
+router.post('/hidden', attendanceController.hideRow);
+router.delete('/hidden', attendanceController.unhideRow);
+
 module.exports = router;

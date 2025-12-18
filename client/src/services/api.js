@@ -7,8 +7,12 @@ const api = axios.create({
 });
 
 // Get all students with classes
-export const getStudents = async () => {
-  const response = await api.get('/attendance/students');
+// Accepts optional year and month for date-aware hidden row filtering
+export const getStudents = async (year = null, month = null) => {
+  const params = {};
+  if (year) params.year = year;
+  if (month) params.month = month;
+  const response = await api.get('/attendance/students', { params });
   return response.data;
 };
 
@@ -273,6 +277,33 @@ export const toggleTeacherPayment = async (teacherId, studentId, year, month, pa
     year,
     month,
     password
+  });
+  return response.data;
+};
+
+// ==================== HIDDEN ROWS API ====================
+
+// Get all hidden rows
+export const getHiddenRows = async () => {
+  const response = await api.get('/attendance/hidden');
+  return response.data;
+};
+
+// Hide a student row (student-subject combination) from a specific month onwards
+export const hideRow = async (studentId, subject = null, year = null, month = null) => {
+  const response = await api.post('/attendance/hidden', {
+    studentId,
+    subject,
+    year,
+    month
+  });
+  return response.data;
+};
+
+// Unhide a student row
+export const unhideRow = async (studentId, subject = null) => {
+  const response = await api.delete('/attendance/hidden', {
+    data: { studentId, subject }
   });
   return response.data;
 };

@@ -1,6 +1,6 @@
 import React, { useMemo, useState, useRef, useEffect } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { setAttendance, deleteAttendance, setNote } from '../services/api';
+import { setAttendance, deleteAttendance, setNote, hideRow } from '../services/api';
 
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
@@ -211,6 +211,36 @@ function AttendanceGrid({ students, attendance, notes, holidays = [], year, mont
     }
   });
 
+  // Hide row mutation - passes current year/month to hide from this month onwards
+  const hideRowMutation = useMutation({
+    mutationFn: ({ studentId, subject, year, month }) => hideRow(studentId, subject, year, month),
+    onSuccess: () => {
+      // Refetch students to update the list
+      queryClient.invalidateQueries(['students', year, month]);
+    }
+  });
+
+  // Get month name for display
+  const monthNames = ['', 'January', 'February', 'March', 'April', 'May', 'June',
+                      'July', 'August', 'September', 'October', 'November', 'December'];
+
+  // Handle hide row with confirmation
+  const handleHideRow = (student) => {
+    const monthName = monthNames[month];
+    const confirmMessage = student.subject
+      ? `Hide "${student.name}" (${student.subject}) from ${monthName} ${year} onwards?\n\nThey will still appear in previous months.`
+      : `Hide "${student.name}" from ${monthName} ${year} onwards?\n\nThey will still appear in previous months.`;
+
+    if (window.confirm(confirmMessage)) {
+      hideRowMutation.mutate({
+        studentId: student.id,
+        subject: student.subject || null,
+        year,
+        month
+      });
+    }
+  };
+
   // Note handlers now use rowKey (studentId-subject combination)
   const handleNoteChange = (rowKey, value) => {
     setEditingNote(prev => ({ ...prev, [rowKey]: value }));
@@ -329,6 +359,10 @@ function AttendanceGrid({ students, attendance, notes, holidays = [], year, mont
             <th className="bg-blue-50 px-2 py-3 text-center text-xs font-semibold text-blue-700 border-b border-r min-w-[40px]">
               TA
             </th>
+            {/* Hide button header */}
+            <th className="bg-red-50 px-2 py-3 text-center text-xs font-semibold text-red-600 border-b border-r min-w-[50px]">
+              Hide
+            </th>
             {/* Day headers */}
             {days.map(day => {
               const holiday = isHoliday(day.dateStr);
@@ -421,6 +455,16 @@ function AttendanceGrid({ students, attendance, notes, holidays = [], year, mont
                 </td>
                 <td className="px-2 py-2 text-center text-sm font-medium text-blue-600 border-b border-r bg-blue-50">
                   {summary.ta}
+                </td>
+                {/* Hide button cell */}
+                <td className="px-2 py-2 text-center border-b border-r bg-red-50">
+                  <button
+                    onClick={() => handleHideRow(student)}
+                    className="px-2 py-1 rounded bg-red-100 text-red-600 hover:bg-red-500 hover:text-white transition-colors text-xs font-medium border border-red-200 hover:border-red-500"
+                    title={`Hide ${student.name}${student.subject ? ` (${student.subject})` : ''} from ${monthNames[month]} ${year} onwards`}
+                  >
+                    Hide
+                  </button>
                 </td>
                 {/* Day cells */}
                 {days.map(day => {
