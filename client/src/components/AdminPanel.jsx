@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { getHolidays, addHoliday, deleteHoliday, getStudentsWithSubjectTuition, setSubjectTuition, toggleSubjectPayment, addStudentSubject, deleteStudentSubject, getSubjects, getStudents, getTeachersWithCommission, setTeacherCommission, toggleTeacherPayment } from '../services/api';
+import { getHolidays, addHoliday, deleteHoliday, getStudentsWithSubjectTuition, setSubjectTuition, toggleSubjectPayment, addStudentSubject, deleteStudentSubject, getSubjects, getStudents, getTeachersWithCommission, setTeacherCommission, toggleTeacherPayment, getHiddenRows, unhideRow } from '../services/api';
 
 const MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
 const SHORT_MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -122,6 +122,22 @@ function AdminPanel({ adminPassword, onLogout }) {
     queryKey: ['commission', commissionYear, commissionMonth],
     queryFn: () => getTeachersWithCommission(commissionYear, commissionMonth),
     enabled: activeTab === 'commissions'
+  });
+
+  // Fetch hidden rows
+  const { data: hiddenRows = [], isLoading: hiddenLoading } = useQuery({
+    queryKey: ['hiddenRows'],
+    queryFn: getHiddenRows,
+    enabled: activeTab === 'hidden'
+  });
+
+  // Unhide row mutation
+  const unhideMutation = useMutation({
+    mutationFn: ({ studentId, subject }) => unhideRow(studentId, subject),
+    onSuccess: () => {
+      queryClient.invalidateQueries(['hiddenRows']);
+      queryClient.invalidateQueries(['students']);
+    }
   });
 
   // Set commission mutation (per teacher-student)
@@ -378,6 +394,16 @@ function AdminPanel({ adminPassword, onLogout }) {
           }`}
         >
           Holidays
+        </button>
+        <button
+          onClick={() => setActiveTab('hidden')}
+          className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+            activeTab === 'hidden'
+              ? 'bg-white text-gray-900 shadow-sm'
+              : 'text-gray-600 hover:text-gray-900'
+          }`}
+        >
+          Hidden Students
         </button>
       </div>
 
@@ -987,6 +1013,89 @@ function AdminPanel({ adminPassword, onLogout }) {
             <p className="text-yellow-800 text-sm">
               <strong>Note:</strong> Dates marked as holidays will be blocked from attendance marking.
               Teachers will not be able to check attendance on these dates.
+            </p>
+          </div>
+        </>
+      )}
+
+      {activeTab === 'hidden' && (
+        <>
+          <div className="bg-white rounded-lg shadow p-6">
+            <h3 className="text-lg font-semibold text-gray-800 mb-4">
+              Hidden Students ({hiddenRows.length})
+            </h3>
+
+            {hiddenLoading ? (
+              <div className="text-center py-8 text-gray-500">Loading hidden students...</div>
+            ) : hiddenRows.length === 0 ? (
+              <div className="text-center py-8 text-gray-500">
+                No hidden students. Students hidden from the attendance view will appear here.
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-gray-200">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Student ID
+                      </th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Subject
+                      </th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Hidden From
+                      </th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Hidden At
+                      </th>
+                      <th className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Action
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-gray-200">
+                    {hiddenRows.map((row) => (
+                      <tr key={row.id}>
+                        <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-900">
+                          {row.student_id}
+                        </td>
+                        <td className="px-4 py-3 whitespace-nowrap text-sm text-indigo-600 font-medium">
+                          {row.subject || '(No subject)'}
+                        </td>
+                        <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-600">
+                          {row.hidden_from_year && row.hidden_from_month
+                            ? `${MONTH_NAMES[row.hidden_from_month - 1]} ${row.hidden_from_year}`
+                            : '(All months)'}
+                        </td>
+                        <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-500">
+                          {row.hidden_at ? new Date(row.hidden_at).toLocaleDateString() : '-'}
+                        </td>
+                        <td className="px-4 py-3 whitespace-nowrap text-center">
+                          <button
+                            onClick={() => {
+                              if (window.confirm(`Unhide student ${row.student_id}${row.subject ? ` (${row.subject})` : ''}?`)) {
+                                unhideMutation.mutate({ studentId: row.student_id, subject: row.subject });
+                              }
+                            }}
+                            disabled={unhideMutation.isPending}
+                            className="px-4 py-2 bg-green-600 text-white text-sm rounded-md hover:bg-green-700 disabled:bg-gray-400"
+                          >
+                            Unhide
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {/* Info */}
+          <div className="mt-6 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+            <p className="text-blue-800 text-sm">
+              <strong>Note:</strong> Hidden students are removed from the attendance view starting from the "Hidden From" month.
+              They will still appear in months before that date. Click "Unhide" to restore them to the attendance view.
             </p>
           </div>
         </>
