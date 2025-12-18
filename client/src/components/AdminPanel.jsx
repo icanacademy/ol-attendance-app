@@ -1037,7 +1037,7 @@ function AdminPanel({ adminPassword, onLogout }) {
                   <thead className="bg-gray-50">
                     <tr>
                       <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                        Student ID
+                        Student
                       </th>
                       <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                         Subject
@@ -1056,8 +1056,11 @@ function AdminPanel({ adminPassword, onLogout }) {
                   <tbody className="bg-white divide-y divide-gray-200">
                     {hiddenRows.map((row) => (
                       <tr key={row.id}>
-                        <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-900">
-                          {row.student_id}
+                        <td className="px-4 py-3 whitespace-nowrap">
+                          <div className="text-sm font-medium text-gray-900">{row.student_name || `ID: ${row.student_id}`}</div>
+                          {row.english_name && (
+                            <div className="text-sm text-gray-500">{row.english_name}</div>
+                          )}
                         </td>
                         <td className="px-4 py-3 whitespace-nowrap text-sm text-indigo-600 font-medium">
                           {row.subject || '(No subject)'}
@@ -1073,7 +1076,7 @@ function AdminPanel({ adminPassword, onLogout }) {
                         <td className="px-4 py-3 whitespace-nowrap text-center">
                           <button
                             onClick={() => {
-                              if (window.confirm(`Unhide student ${row.student_id}${row.subject ? ` (${row.subject})` : ''}?`)) {
+                              if (window.confirm(`Unhide "${row.student_name || row.student_id}"${row.subject ? ` (${row.subject})` : ''}?`)) {
                                 unhideMutation.mutate({ studentId: row.student_id, subject: row.subject });
                               }
                             }}

@@ -1017,12 +1017,21 @@ class Attendance {
 
   // ==================== HIDDEN ROWS METHODS ====================
 
-  // Get all hidden rows
+  // Get all hidden rows with student names
   static async getHiddenRows() {
     const query = `
-      SELECT id, student_id, subject, hidden_at, hidden_from_year, hidden_from_month
-      FROM hidden_attendance_rows
-      ORDER BY hidden_from_year DESC, hidden_from_month DESC, hidden_at DESC
+      SELECT
+        h.id,
+        h.student_id,
+        s.name as student_name,
+        s.english_name,
+        h.subject,
+        h.hidden_at,
+        h.hidden_from_year,
+        h.hidden_from_month
+      FROM hidden_attendance_rows h
+      LEFT JOIN students s ON s.id = h.student_id
+      ORDER BY h.hidden_from_year DESC, h.hidden_from_month DESC, h.hidden_at DESC
     `;
     const result = await pool.query(query);
     return result.rows;
