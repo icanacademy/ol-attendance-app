@@ -107,8 +107,27 @@ function AttendanceGrid({ students, attendance, notes, holidays = [], year, mont
 
   // Calculate attendance percentage based on schedule
   // Only counts days that have attendance marked (present, absent, or ta)
-  const getAttendancePercentage = (studentId, subject, scheduleDays) => {
-    const scheduledDayNumbers = parseScheduleDays(scheduleDays);
+  // Now accepts either a scheduleDays string or a schedules array
+  const getAttendancePercentage = (studentId, subject, scheduleDaysOrSchedules) => {
+    let scheduledDayNumbers = [];
+
+    // Handle both old format (string) and new format (array of schedules)
+    if (Array.isArray(scheduleDaysOrSchedules)) {
+      // New format: array of { days, time } objects
+      scheduleDaysOrSchedules.forEach(sched => {
+        if (sched.days) {
+          parseScheduleDays(sched.days).forEach(d => {
+            if (!scheduledDayNumbers.includes(d)) {
+              scheduledDayNumbers.push(d);
+            }
+          });
+        }
+      });
+    } else {
+      // Old format: single scheduleDays string
+      scheduledDayNumbers = parseScheduleDays(scheduleDaysOrSchedules);
+    }
+
     if (scheduledDayNumbers.length === 0) return null;
 
     let markedCount = 0;
@@ -295,13 +314,15 @@ function AttendanceGrid({ students, attendance, notes, holidays = [], year, mont
     let present = 0;
     let absent = 0;
     let ta = 0;
+    let noshow = 0;
     days.forEach(day => {
       const status = getAttendanceStatus(studentId, subject, day.dateStr);
       if (status === 'present') present++;
       else if (status === 'absent') absent++;
       else if (status === 'ta') ta++;
+      else if (status === 'noshow') noshow++;
     });
-    return { present, absent, ta };
+    return { present, absent, ta, noshow };
   };
 
   if (isLoading) {
@@ -356,8 +377,11 @@ function AttendanceGrid({ students, attendance, notes, holidays = [], year, mont
             <th className="bg-red-50 px-2 py-3 text-center text-xs font-semibold text-red-700 border-b min-w-[40px]">
               A
             </th>
-            <th className="bg-blue-50 px-2 py-3 text-center text-xs font-semibold text-blue-700 border-b border-r min-w-[40px]">
+            <th className="bg-blue-50 px-2 py-3 text-center text-xs font-semibold text-blue-700 border-b min-w-[40px]">
               TA
+            </th>
+            <th className="bg-orange-50 px-2 py-3 text-center text-xs font-semibold text-orange-700 border-b border-r min-w-[40px]">
+              N
             </th>
             {/* Hide button header */}
             <th className="bg-red-50 px-2 py-3 text-center text-xs font-semibold text-red-600 border-b border-r min-w-[50px]">
@@ -398,6 +422,9 @@ function AttendanceGrid({ students, attendance, notes, holidays = [], year, mont
                 {/* Student name */}
                 <td className="sticky left-0 z-10 px-4 py-2 text-sm border-b bg-inherit">
                   <div className="font-medium text-gray-900">{student.name}</div>
+                  {student.korean_name && (
+                    <div className="text-xs text-blue-600 font-medium">{student.korean_name}</div>
+                  )}
                   {student.english_name && (
                     <div className="text-xs text-gray-500">{student.english_name}</div>
                   )}
@@ -412,17 +439,26 @@ function AttendanceGrid({ students, attendance, notes, holidays = [], year, mont
                 </td>
                 {/* Schedule */}
                 <td className="px-3 py-2 text-sm border-b bg-purple-50">
-                  {student.schedule_time ? (
+                  {student.schedules && student.schedules.length > 0 ? (
+                    <div className="space-y-1">
+                      {student.schedules.map((sched, idx) => (
+                        <div key={idx} className={idx > 0 ? 'pt-1 border-t border-purple-200' : ''}>
+                          <div className="text-purple-500 text-xs font-medium">{sched.days}</div>
+                          <div className="text-purple-700 text-xs">{sched.time}</div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : student.schedule_time ? (
                     <div>
-                      <div className="text-purple-700 font-medium text-xs">{student.schedule_time}</div>
-                      <div className="text-purple-500 text-xs">{student.schedule_days}</div>
+                      <div className="text-purple-500 text-xs font-medium">{student.schedule_days}</div>
+                      <div className="text-purple-700 text-xs">{student.schedule_time}</div>
                     </div>
                   ) : '-'}
                 </td>
                 {/* Attendance % */}
                 <td className="px-2 py-2 text-center text-sm font-medium border-b bg-emerald-50">
                   {(() => {
-                    const pct = getAttendancePercentage(student.id, student.subject, student.schedule_days);
+                    const pct = getAttendancePercentage(student.id, student.subject, student.schedules || student.schedule_days);
                     if (pct === null) return <span className="text-gray-400">-</span>;
                     return (
                       <span className={
@@ -453,8 +489,11 @@ function AttendanceGrid({ students, attendance, notes, holidays = [], year, mont
                 <td className="px-2 py-2 text-center text-sm font-medium text-red-600 border-b bg-red-50">
                   {summary.absent}
                 </td>
-                <td className="px-2 py-2 text-center text-sm font-medium text-blue-600 border-b border-r bg-blue-50">
+                <td className="px-2 py-2 text-center text-sm font-medium text-blue-600 border-b bg-blue-50">
                   {summary.ta}
+                </td>
+                <td className="px-2 py-2 text-center text-sm font-medium text-orange-600 border-b border-r bg-orange-50">
+                  {summary.noshow}
                 </td>
                 {/* Hide button cell */}
                 <td className="px-2 py-2 text-center border-b border-r bg-red-50">
@@ -499,11 +538,13 @@ function AttendanceGrid({ students, attendance, notes, holidays = [], year, mont
                               ? 'bg-red-500 text-white'
                               : status === 'ta'
                               ? 'bg-blue-500 text-white'
+                              : status === 'noshow'
+                              ? 'bg-orange-500 text-white'
                               : 'bg-gray-200 text-gray-400 hover:bg-gray-300'
                             }
                           `}
                         >
-                          {status === 'present' ? 'P' : status === 'absent' ? 'A' : status === 'ta' ? 'TA' : '-'}
+                          {status === 'present' ? 'P' : status === 'absent' ? 'A' : status === 'ta' ? 'TA' : status === 'noshow' ? 'N' : '-'}
                         </div>
                       )}
                     </td>
@@ -542,6 +583,13 @@ function AttendanceGrid({ students, attendance, notes, holidays = [], year, mont
           >
             <span className="w-6 h-6 rounded-full bg-blue-500 flex items-center justify-center text-white text-xs">TA</span>
             <span>Teacher's Abs.</span>
+          </button>
+          <button
+            onClick={() => handleSelectStatus('noshow')}
+            className="w-full px-4 py-2 text-left hover:bg-gray-100 flex items-center gap-3"
+          >
+            <span className="w-6 h-6 rounded-full bg-orange-500 flex items-center justify-center text-white text-xs">N</span>
+            <span>No Show</span>
           </button>
           <div className="border-t my-1"></div>
           <button

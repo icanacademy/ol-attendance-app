@@ -596,6 +596,9 @@ function AdminPanel({ adminPassword, onLogout }) {
                     <tr key={row.id} className={row.paid ? 'bg-green-50' : ''}>
                       <td className="px-4 py-3 whitespace-nowrap">
                         <div className="text-sm font-medium text-gray-900">{row.name}</div>
+                        {row.korean_name && (
+                          <div className="text-xs text-blue-600 font-medium">{row.korean_name}</div>
+                        )}
                         {row.english_name && (
                           <div className="text-sm text-gray-500">{row.english_name}</div>
                         )}
@@ -843,6 +846,9 @@ function AdminPanel({ adminPassword, onLogout }) {
                       </td>
                       <td className="px-4 py-3 whitespace-nowrap">
                         <div className="text-sm font-medium text-gray-900">{row.student_name}</div>
+                        {row.korean_name && (
+                          <div className="text-xs text-blue-600 font-medium">{row.korean_name}</div>
+                        )}
                         {row.english_name && (
                           <div className="text-sm text-gray-500">{row.english_name}</div>
                         )}
@@ -1058,6 +1064,9 @@ function AdminPanel({ adminPassword, onLogout }) {
                       <tr key={row.id}>
                         <td className="px-4 py-3 whitespace-nowrap">
                           <div className="text-sm font-medium text-gray-900">{row.student_name || `ID: ${row.student_id}`}</div>
+                          {row.korean_name && (
+                            <div className="text-xs text-blue-600 font-medium">{row.korean_name}</div>
+                          )}
                           {row.english_name && (
                             <div className="text-sm text-gray-500">{row.english_name}</div>
                           )}

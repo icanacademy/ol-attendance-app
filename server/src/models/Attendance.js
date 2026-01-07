@@ -325,7 +325,7 @@ class Attendance {
     return result.rows[0];
   }
 
-  // Toggle attendance status (cycles: present -> absent -> ta -> clear)
+  // Toggle attendance status (cycles: present -> absent -> ta -> noshow -> clear)
   static async toggleAttendance(studentId, date, subject = null) {
     // First check if record exists
     const checkQuery = `
@@ -339,13 +339,15 @@ class Attendance {
       return this.setAttendance(studentId, date, 'present', null, subject);
     } else {
       const currentStatus = existing.rows[0].status;
-      // Cycle: present -> absent -> ta -> delete (clear)
+      // Cycle: present -> absent -> ta -> noshow -> delete (clear)
       if (currentStatus === 'present') {
         return this.setAttendance(studentId, date, 'absent', null, subject);
       } else if (currentStatus === 'absent') {
         return this.setAttendance(studentId, date, 'ta', null, subject);
+      } else if (currentStatus === 'ta') {
+        return this.setAttendance(studentId, date, 'noshow', null, subject);
       } else {
-        // ta -> delete the record
+        // noshow -> delete the record
         await this.delete(studentId, date, subject);
         return { student_id: studentId, date, status: null, subject };
       }
