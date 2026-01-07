@@ -47,9 +47,9 @@ exports.setAttendance = async (req, res) => {
       });
     }
 
-    if (!['present', 'absent', 'ta'].includes(status)) {
+    if (!['present', 'absent', 'ta', 'noshow'].includes(status)) {
       return res.status(400).json({
-        error: 'Status must be "present", "absent", or "ta"'
+        error: 'Status must be "present", "absent", "ta", or "noshow"'
       });
     }
 
