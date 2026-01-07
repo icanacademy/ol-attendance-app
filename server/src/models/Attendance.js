@@ -4,6 +4,23 @@ const axios = require('axios');
 // Online Scheduler API URL
 const SCHEDULER_API_URL = process.env.SCHEDULER_API_URL || 'http://localhost:4488/api';
 
+// Helper function to extract Korean name from brackets in the name field
+// e.g., "Kim Ji Hye [김지혜]" -> "김지혜"
+// e.g., "Kim Bo Yeon (Sharon) [김보연]" -> "김보연"
+const extractKoreanName = (name) => {
+  if (!name) return null;
+  const match = name.match(/\[([^\]]+)\]/);
+  return match ? match[1] : null;
+};
+
+// Helper function to get clean display name (without Korean in brackets)
+// e.g., "Kim Ji Hye [김지혜]" -> "Kim Ji Hye"
+// e.g., "Kim Bo Yeon (Sharon) [김보연]" -> "Kim Bo Yeon (Sharon)"
+const getCleanDisplayName = (name) => {
+  if (!name) return name;
+  return name.replace(/\s*\[[^\]]+\]\s*$/, '').trim();
+};
+
 class Attendance {
   // Get all students from the online scheduler API with their primary teacher from database
   // Returns one row per student-subject combination (students with multiple subjects get multiple rows)
@@ -11,19 +28,22 @@ class Attendance {
   static async getStudentsWithClasses(year = null, month = null) {
     try {
       // Fetch students from online scheduler API
-      const studentsResponse = await axios.get(`${SCHEDULER_API_URL}/students/all-unique`);
+      // Use /all-active endpoint to get ALL students including those with duplicate names
+      const studentsResponse = await axios.get(`${SCHEDULER_API_URL}/students/all-active`);
       const students = studentsResponse.data;
+
 
       // Get all subjects for each student from database
       // This returns multiple rows per student if they have multiple subjects
+      // Group by time slot to show different schedules separately
       const studentSubjectsQuery = `
         SELECT
           s.id as student_id,
           s.name as student_name,
           a.subject,
           t.name as teacher_name,
-          TO_CHAR(MIN(ts.start_time), 'HH:MI AM') as start_time,
-          TO_CHAR(MAX(ts.end_time), 'HH:MI AM') as end_time,
+          TO_CHAR(ts.start_time, 'HH:MI AM') as start_time,
+          TO_CHAR(ts.end_time, 'HH:MI AM') as end_time,
           ARRAY_AGG(DISTINCT EXTRACT(DOW FROM a.date)::int ORDER BY EXTRACT(DOW FROM a.date)::int) as days
         FROM assignment_students ast
         JOIN students s ON s.id = ast.student_id
@@ -32,12 +52,45 @@ class Attendance {
         LEFT JOIN assignment_teachers att ON att.assignment_id = a.id
         LEFT JOIN teachers t ON t.id = att.teacher_id
         WHERE a.is_active = true AND s.is_active = true
-        GROUP BY s.id, s.name, a.subject, t.name
-        ORDER BY s.name, a.subject
+        GROUP BY s.id, s.name, a.subject, t.name, ts.start_time, ts.end_time
+        ORDER BY s.name, a.subject, ts.start_time
       `;
 
-      let studentSubjectsMap = {}; // { student_id: [{ subject, teacher, schedule }] }
+      let studentSubjectsMap = {}; // { student_id: [{ subject, teacher, schedules }] }
       const dayNames = ['Su', 'M', 'T', 'W', 'Th', 'F', 'Sa'];
+
+      // Helper function to merge consecutive time slots with the same days
+      // e.g., [7:00-7:30 MWF, 7:30-8:00 MWF] -> [7:00-8:00 MWF]
+      const mergeConsecutiveSchedules = (schedules) => {
+        if (!schedules || schedules.length === 0) return [];
+
+        // Sort by days first, then by start time
+        const sorted = [...schedules].sort((a, b) => {
+          if (a.days !== b.days) return a.days.localeCompare(b.days);
+          return a.startTime.localeCompare(b.startTime);
+        });
+
+        const merged = [];
+        let current = { ...sorted[0] };
+
+        for (let i = 1; i < sorted.length; i++) {
+          const next = sorted[i];
+          // Check if same days and consecutive times (current end == next start)
+          if (current.days === next.days && current.endTime === next.startTime) {
+            // Merge: extend current end time
+            current.endTime = next.endTime;
+            current.time = `${current.startTime} - ${current.endTime}`;
+          } else {
+            // Not consecutive, push current and start new
+            merged.push({ time: current.time, days: current.days });
+            current = { ...next };
+          }
+        }
+        // Push the last one
+        merged.push({ time: current.time, days: current.days });
+
+        return merged;
+      };
 
       try {
         const result = await pool.query(studentSubjectsQuery);
@@ -45,19 +98,42 @@ class Attendance {
           if (!studentSubjectsMap[row.student_id]) {
             studentSubjectsMap[row.student_id] = [];
           }
+
+          const daysStr = row.days ? row.days.map(d => dayNames[d]).join('') : null;
+          const scheduleEntry = {
+            time: row.start_time && row.end_time ? `${row.start_time} - ${row.end_time}` : null,
+            startTime: row.start_time || null,
+            endTime: row.end_time || null,
+            days: daysStr
+          };
+
           // Check if we already have this subject for this student
           const existingSubject = studentSubjectsMap[row.student_id].find(
             s => s.subject === row.subject
           );
-          if (!existingSubject) {
-            const daysStr = row.days ? row.days.map(d => dayNames[d]).join('') : null;
+
+          if (existingSubject) {
+            // Add this schedule to existing subject entry
+            if (scheduleEntry.time && scheduleEntry.days) {
+              existingSubject.schedules.push(scheduleEntry);
+            }
+          } else {
+            // Create new subject entry with schedules array
             studentSubjectsMap[row.student_id].push({
               subject: row.subject || null,
               teacher_name: row.teacher_name || null,
-              schedule_time: row.start_time && row.end_time ? `${row.start_time} - ${row.end_time}` : null,
-              schedule_days: daysStr
+              schedules: scheduleEntry.time && scheduleEntry.days ? [scheduleEntry] : []
             });
           }
+        });
+
+        // Merge consecutive time slots for each student-subject
+        Object.values(studentSubjectsMap).forEach(subjects => {
+          subjects.forEach(subjectInfo => {
+            if (subjectInfo.schedules && subjectInfo.schedules.length > 0) {
+              subjectInfo.schedules = mergeConsecutiveSchedules(subjectInfo.schedules);
+            }
+          });
         });
       } catch (err) {
         console.log('Could not fetch student subjects from database:', err.message);
@@ -101,14 +177,29 @@ class Attendance {
           if (subjects && subjects.length > 0) {
             // Student has subjects - create one row per subject
             subjects.forEach(subjectInfo => {
+              // Format schedules array into display strings
+              // Each schedule entry has { time, days }
+              const schedules = subjectInfo.schedules || [];
+
+              // Create formatted schedule strings for display
+              // e.g., ["M 4:00 PM - 4:50 PM", "TTh 5:00 PM - 5:50 PM"]
+              const formattedSchedules = schedules.map(s => ({
+                time: s.time,
+                days: s.days
+              }));
+
               result.push({
                 id: student.id,
                 name: student.name,
+                korean_name: student.korean_name || null,
                 english_name: student.english_name,
                 color_keyword: student.color_keyword,
                 teacher_name: subjectInfo.teacher_name,
-                schedule_time: subjectInfo.schedule_time,
-                schedule_days: subjectInfo.schedule_days,
+                // Keep backward compatibility with single schedule fields
+                schedule_time: schedules.length > 0 ? schedules[0].time : null,
+                schedule_days: schedules.length > 0 ? schedules[0].days : null,
+                // New: array of all schedules for this student-subject
+                schedules: formattedSchedules,
                 subject: subjectInfo.subject,
                 // Unique key for this student-subject row
                 row_key: `${student.id}-${subjectInfo.subject || 'default'}`
@@ -119,11 +210,13 @@ class Attendance {
             result.push({
               id: student.id,
               name: student.name,
+              korean_name: student.korean_name || null,
               english_name: student.english_name,
               color_keyword: student.color_keyword,
               teacher_name: null,
               schedule_time: null,
               schedule_days: null,
+              schedules: [],
               subject: null,
               row_key: `${student.id}-default`
             });
@@ -707,6 +800,7 @@ class Attendance {
           SELECT DISTINCT ON (s.id)
             s.id as student_id,
             s.name as student_name,
+            s.korean_name,
             s.english_name,
             t.id as teacher_id,
             t.name as teacher_name
@@ -716,7 +810,7 @@ class Attendance {
           JOIN students s ON s.id = ast.student_id
           JOIN teachers t ON t.id = att.teacher_id
           WHERE a.is_active = true AND s.is_active = true
-          GROUP BY s.id, s.name, s.english_name, t.id, t.name
+          GROUP BY s.id, s.name, s.korean_name, s.english_name, t.id, t.name
           ORDER BY s.id, COUNT(*) DESC
         ),
         class_counts AS (
@@ -732,6 +826,7 @@ class Attendance {
         SELECT
           st.student_id,
           st.student_name,
+          st.korean_name,
           st.english_name,
           st.teacher_id,
           st.teacher_name,
@@ -755,6 +850,7 @@ class Attendance {
         id: `${row.teacher_id}-${row.student_id}`, // Composite ID
         student_id: row.student_id,
         student_name: row.student_name,
+        korean_name: row.korean_name,
         english_name: row.english_name,
         teacher_id: row.teacher_id,
         teacher_name: row.teacher_name,
@@ -994,6 +1090,7 @@ class Attendance {
             id: key,
             student_id: student.id,
             name: student.name,
+            korean_name: student.korean_name,
             english_name: student.english_name,
             teacher_name: student.teacher_name,
             subject: subject,
@@ -1024,6 +1121,7 @@ class Attendance {
         h.id,
         h.student_id,
         s.name as student_name,
+        s.korean_name,
         s.english_name,
         h.subject,
         h.hidden_at,
