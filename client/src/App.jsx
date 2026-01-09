@@ -1,14 +1,19 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import MonthTabs from './components/MonthTabs';
 import AttendanceGrid from './components/AttendanceGrid';
 import AdminPanel from './components/AdminPanel';
-import { getStudents, getMonthlyAttendance, getNotes, getHolidaysByMonth, verifyAdmin } from './services/api';
+import { getStudents, getMonthlyAttendance, getNotes, getHolidaysByMonth, verifyAdmin, warmupApi } from './services/api';
 
 function App() {
   const today = new Date();
   const [selectedYear, setSelectedYear] = useState(today.getFullYear());
   const [selectedMonth, setSelectedMonth] = useState(today.getMonth() + 1);
+
+  // Warm up the API on app load to reduce cold start delays
+  useEffect(() => {
+    warmupApi();
+  }, []);
   const [activeTab, setActiveTab] = useState('attendance'); // 'attendance' or 'admin'
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [passwordInput, setPasswordInput] = useState('');

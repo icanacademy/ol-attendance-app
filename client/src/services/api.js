@@ -6,6 +6,11 @@ const api = axios.create({
   baseURL: API_BASE,
 });
 
+// Warm up the API to reduce cold start delays
+export const warmupApi = () => {
+  api.get('/health').catch(() => {});
+};
+
 // Get all students with classes
 // Accepts optional year and month for date-aware hidden row filtering
 export const getStudents = async (year = null, month = null) => {
