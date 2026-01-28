@@ -6,7 +6,9 @@
       "src": "src/server.js",
       "use": "@vercel/node",
       "config": {
-        "maxLambdaSize": "15mb"
+        "maxLambdaSize": "15mb",
+        "memory": 1024,
+        "maxDuration": 30
       }
     }
   ],
@@ -16,16 +18,10 @@
       "dest": "src/server.js"
     }
   ],
-  "functions": {
-    "src/server.js": {
-      "memory": 1024,
-      "maxDuration": 30
-    }
-  },
   "crons": [
     {
       "path": "/api/health",
-      "schedule": "*/5 * * * *"
+      "schedule": "0 0 * * *"
     }
   ]
 }
