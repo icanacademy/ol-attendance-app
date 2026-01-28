@@ -289,6 +289,123 @@ class Attendance {
     return result.rows;
   }
 
+  // Get class count for a date range grouped by teacher, student, and subject
+  static async getClassCountRange(startDate, endDate, statuses = ['present'], teacherId = null) {
+    try {
+      // First, get students from online scheduler to get teacher info
+      const studentsResponse = await axios.get(`${SCHEDULER_API_URL}/students/all-active`);
+      const allStudents = studentsResponse.data;
+
+      // Build a map of student_id to student info including teacher
+      const studentInfoMap = {};
+      allStudents.forEach(s => {
+        studentInfoMap[s.id] = {
+          name: s.name,
+          korean_name: s.korean_name,
+          english_name: s.english_name
+        };
+      });
+
+      // Get teacher assignments from database
+      const teacherQuery = `
+        SELECT DISTINCT
+          s.id as student_id,
+          t.id as teacher_id,
+          t.name as teacher_name
+        FROM assignment_students ast
+        JOIN students s ON s.id = ast.student_id
+        JOIN assignments a ON a.id = ast.assignment_id
+        LEFT JOIN assignment_teachers att ON att.assignment_id = a.id
+        LEFT JOIN teachers t ON t.id = att.teacher_id
+        WHERE a.is_active = true AND s.is_active = true
+      `;
+
+      let studentTeacherMap = {}; // student_id -> { teacherId, teacherName }
+      try {
+        const teacherResult = await pool.query(teacherQuery);
+        teacherResult.rows.forEach(row => {
+          if (!studentTeacherMap[row.student_id]) {
+            studentTeacherMap[row.student_id] = {
+              teacherId: row.teacher_id,
+              teacherName: row.teacher_name
+            };
+          }
+        });
+      } catch (err) {
+        console.log('Could not fetch teacher assignments:', err.message);
+      }
+
+      // Build the attendance count query with dynamic status filter
+      const statusPlaceholders = statuses.map((_, i) => `$${i + 3}`).join(', ');
+      const query = `
+        SELECT
+          a.student_id,
+          a.subject,
+          COUNT(*) as class_count
+        FROM attendance a
+        WHERE a.date >= $1 AND a.date <= $2
+          AND a.status IN (${statusPlaceholders})
+        GROUP BY a.student_id, a.subject
+        ORDER BY a.student_id, a.subject
+      `;
+
+      const params = [startDate, endDate, ...statuses];
+      const result = await pool.query(query, params);
+
+      // Group results by teacher
+      const teacherGroups = {};
+
+      result.rows.forEach(row => {
+        const studentId = row.student_id;
+        const teacherInfo = studentTeacherMap[studentId] || { teacherId: null, teacherName: 'Unknown Teacher' };
+        const studentInfo = studentInfoMap[studentId] || { name: `Student ${studentId}` };
+
+        // Apply teacher filter if specified
+        if (teacherId && teacherInfo.teacherId !== teacherId) {
+          return;
+        }
+
+        const teacherKey = teacherInfo.teacherId || 'unknown';
+
+        if (!teacherGroups[teacherKey]) {
+          teacherGroups[teacherKey] = {
+            teacherId: teacherInfo.teacherId,
+            teacherName: teacherInfo.teacherName,
+            students: [],
+            totalClasses: 0
+          };
+        }
+
+        const classCount = parseInt(row.class_count);
+        teacherGroups[teacherKey].students.push({
+          studentId: studentId,
+          studentName: getCleanDisplayName(studentInfo.name),
+          koreanName: studentInfo.korean_name,
+          subject: row.subject,
+          classCount: classCount
+        });
+        teacherGroups[teacherKey].totalClasses += classCount;
+      });
+
+      // Convert to array and sort by teacher name
+      const teachers = Object.values(teacherGroups).sort((a, b) => {
+        if (!a.teacherName) return 1;
+        if (!b.teacherName) return -1;
+        return a.teacherName.localeCompare(b.teacherName);
+      });
+
+      // Sort students within each teacher by name
+      teachers.forEach(teacher => {
+        teacher.students.sort((a, b) => a.studentName.localeCompare(b.studentName));
+      });
+
+      return { teachers };
+    } catch (error) {
+      console.error('Error in getClassCountRange:', error);
+      throw error;
+    }
+  }
+
   // Get attendance for a specific student in a month
   static async getByStudentAndMonth(studentId, year, month) {
     const startDate = `${year}-${String(month).padStart(2, '0')}-01`;

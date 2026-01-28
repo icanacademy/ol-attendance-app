@@ -286,6 +286,21 @@ export const toggleTeacherPayment = async (teacherId, studentId, year, month, pa
   return response.data;
 };
 
+// ==================== CLASS COUNT RANGE API ====================
+
+// Get class counts for a date range
+export const getClassCountRange = async (startDate, endDate, statuses = [], teacherId = null) => {
+  const response = await api.get('/attendance/count-range', {
+    params: {
+      startDate,
+      endDate,
+      statuses: statuses.join(','),
+      teacherId
+    }
+  });
+  return response.data;
+};
+
 // ==================== HIDDEN ROWS API ====================
 
 // Get all hidden rows

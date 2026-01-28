@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import MonthTabs from './components/MonthTabs';
 import AttendanceGrid from './components/AttendanceGrid';
 import AdminPanel from './components/AdminPanel';
+import ClassCountModal from './components/ClassCountModal';
 import { getStudents, getMonthlyAttendance, getNotes, getHolidaysByMonth, verifyAdmin, warmupApi } from './services/api';
 
 function App() {
@@ -20,6 +21,12 @@ function App() {
   const [passwordError, setPasswordError] = useState('');
   const [adminPassword, setAdminPassword] = useState(null);
   const [selectedTeacher, setSelectedTeacher] = useState(''); // Teacher filter
+
+  // Date range selection for class count
+  const [isSelectingRange, setIsSelectingRange] = useState(false);
+  const [rangeStartDate, setRangeStartDate] = useState(null);
+  const [rangeEndDate, setRangeEndDate] = useState(null);
+  const [showClassCountModal, setShowClassCountModal] = useState(false);
 
   // Fetch students (with year/month for date-aware hidden row filtering)
   const {
@@ -114,6 +121,43 @@ function App() {
     setActiveTab('attendance');
   };
 
+  // Date range selection handlers
+  const handleDateRangeSelect = (dateStr) => {
+    if (!rangeStartDate) {
+      // First click - set start date
+      setRangeStartDate(dateStr);
+    } else if (!rangeEndDate) {
+      // Second click - set end date and show modal
+      // Ensure start is before end
+      if (dateStr < rangeStartDate) {
+        setRangeEndDate(rangeStartDate);
+        setRangeStartDate(dateStr);
+      } else {
+        setRangeEndDate(dateStr);
+      }
+      setIsSelectingRange(false);
+      setShowClassCountModal(true);
+    }
+  };
+
+  const handleClearRange = () => {
+    setRangeStartDate(null);
+    setRangeEndDate(null);
+    setIsSelectingRange(false);
+  };
+
+  const toggleRangeSelection = () => {
+    if (isSelectingRange) {
+      // Cancel selection
+      handleClearRange();
+    } else {
+      // Start selection
+      setRangeStartDate(null);
+      setRangeEndDate(null);
+      setIsSelectingRange(true);
+    }
+  };
+
   if (studentsError) {
     return (
       <div className="min-h-screen bg-gray-100 flex items-center justify-center">
@@ -201,6 +245,41 @@ function App() {
                   )}
                 </div>
                 <span className="text-gray-300">|</span>
+                {/* Date Range Selection Button */}
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={toggleRangeSelection}
+                    className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                      isSelectingRange
+                        ? 'bg-purple-600 text-white'
+                        : 'bg-purple-100 text-purple-700 hover:bg-purple-200'
+                    }`}
+                  >
+                    {isSelectingRange
+                      ? rangeStartDate
+                        ? 'Click end date...'
+                        : 'Click start date...'
+                      : 'Count Classes'}
+                  </button>
+                  {(rangeStartDate || rangeEndDate) && !isSelectingRange && (
+                    <button
+                      onClick={() => setShowClassCountModal(true)}
+                      className="px-2 py-1 text-xs bg-purple-50 text-purple-600 rounded hover:bg-purple-100"
+                    >
+                      View
+                    </button>
+                  )}
+                  {isSelectingRange && (
+                    <button
+                      onClick={handleClearRange}
+                      className="text-gray-400 hover:text-gray-600"
+                      title="Cancel selection"
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
+                <span className="text-gray-300">|</span>
                 <div className="flex items-center gap-2">
                   <span className="w-3 h-3 rounded-full bg-green-500"></span>
                   <span className="text-gray-600">Present: {totalSummary.present}</span>
@@ -242,6 +321,10 @@ function App() {
               year={selectedYear}
               month={selectedMonth}
               isLoading={isLoading}
+              isSelectingRange={isSelectingRange}
+              rangeStartDate={rangeStartDate}
+              rangeEndDate={rangeEndDate}
+              onDateRangeSelect={handleDateRangeSelect}
             />
 
             {/* Legend */}
@@ -319,6 +402,16 @@ function App() {
           </div>
         </div>
       )}
+
+      {/* Class Count Modal */}
+      <ClassCountModal
+        isOpen={showClassCountModal}
+        onClose={() => setShowClassCountModal(false)}
+        startDate={rangeStartDate}
+        endDate={rangeEndDate}
+        selectedTeacher={selectedTeacher}
+        onClearRange={handleClearRange}
+      />
     </div>
   );
 }

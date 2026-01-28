@@ -8,6 +8,9 @@ router.get('/students', attendanceController.getStudents);
 // Get attendance for a month
 router.get('/monthly', attendanceController.getMonthlyAttendance);
 
+// Get class count for a date range
+router.get('/count-range', attendanceController.getClassCountRange);
+
 // Get monthly summary
 router.get('/summary', attendanceController.getMonthlySummary);
 

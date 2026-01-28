@@ -4,7 +4,19 @@ import { setAttendance, deleteAttendance, setNote, hideRow } from '../services/a
 
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
-function AttendanceGrid({ students, attendance, notes, holidays = [], year, month, isLoading }) {
+function AttendanceGrid({
+  students,
+  attendance,
+  notes,
+  holidays = [],
+  year,
+  month,
+  isLoading,
+  isSelectingRange = false,
+  rangeStartDate = null,
+  rangeEndDate = null,
+  onDateRangeSelect = () => {}
+}) {
   const queryClient = useQueryClient();
   const [dropdown, setDropdown] = useState(null); // { studentId, dateStr, subject, x, y }
   const [editingNote, setEditingNote] = useState({}); // { rowKey: noteText }
@@ -74,6 +86,16 @@ function AttendanceGrid({ students, attendance, notes, holidays = [], year, mont
   }, [holidays]);
 
   const isHoliday = (dateStr) => holidaysSet.has(dateStr);
+
+  // Check if date is in selected range
+  const isInSelectedRange = (dateStr) => {
+    if (!rangeStartDate) return false;
+    if (!rangeEndDate) return dateStr === rangeStartDate;
+    return dateStr >= rangeStartDate && dateStr <= rangeEndDate;
+  };
+
+  const isRangeStart = (dateStr) => dateStr === rangeStartDate;
+  const isRangeEnd = (dateStr) => dateStr === rangeEndDate;
 
   // Map schedule day abbreviations to day of week numbers (0=Sun, 1=Mon, etc.)
   const scheduleDayMap = {
@@ -282,6 +304,12 @@ function AttendanceGrid({ students, attendance, notes, holidays = [], year, mont
   };
 
   const handleCellClick = (e, studentId, dateStr, subject) => {
+    // If in range selection mode, handle date selection instead
+    if (isSelectingRange) {
+      onDateRangeSelect(dateStr);
+      return;
+    }
+
     const rect = e.currentTarget.getBoundingClientRect();
     setDropdown({
       studentId,
@@ -390,11 +418,21 @@ function AttendanceGrid({ students, attendance, notes, holidays = [], year, mont
             {/* Day headers */}
             {days.map(day => {
               const holiday = isHoliday(day.dateStr);
+              const inRange = isInSelectedRange(day.dateStr);
+              const rangeStart = isRangeStart(day.dateStr);
+              const rangeEnd = isRangeEnd(day.dateStr);
               return (
                 <th
                   key={day.day}
+                  onClick={isSelectingRange ? () => onDateRangeSelect(day.dateStr) : undefined}
                   className={`px-1 py-2 text-center text-xs border-b min-w-[36px] ${
-                    day.isToday
+                    isSelectingRange ? 'cursor-pointer hover:bg-purple-200' : ''
+                  } ${
+                    inRange
+                      ? rangeStart || rangeEnd
+                        ? 'bg-purple-500 text-white ring-2 ring-purple-600'
+                        : 'bg-purple-200 text-purple-900'
+                      : day.isToday
                       ? 'bg-amber-400 text-amber-900 ring-2 ring-amber-500'
                       : holiday
                       ? 'bg-orange-100 text-orange-700'
@@ -404,7 +442,7 @@ function AttendanceGrid({ students, attendance, notes, holidays = [], year, mont
                   }`}
                 >
                   <div className="font-semibold">{day.day}</div>
-                  <div className={`text-[10px] ${day.isToday ? 'text-amber-800' : ''}`}>{holiday ? 'H' : day.dayName}</div>
+                  <div className={`text-[10px] ${inRange ? '' : day.isToday ? 'text-amber-800' : ''}`}>{holiday ? 'H' : day.dayName}</div>
                 </th>
               );
             })}
@@ -509,11 +547,16 @@ function AttendanceGrid({ students, attendance, notes, holidays = [], year, mont
                 {days.map(day => {
                   const status = getAttendanceStatus(student.id, student.subject, day.dateStr);
                   const holiday = isHoliday(day.dateStr);
+                  const inRange = isInSelectedRange(day.dateStr);
                   return (
                     <td
                       key={day.day}
                       className={`px-1 py-2 text-center border-b transition-colors ${
-                        day.isToday
+                        isSelectingRange ? 'cursor-pointer' : ''
+                      } ${
+                        inRange
+                          ? 'bg-purple-100'
+                          : day.isToday
                           ? 'bg-amber-100 cursor-pointer'
                           : holiday
                           ? 'bg-orange-50 cursor-not-allowed'
@@ -521,7 +564,7 @@ function AttendanceGrid({ students, attendance, notes, holidays = [], year, mont
                           ? 'bg-gray-100 cursor-pointer'
                           : 'cursor-pointer'
                       }`}
-                      onClick={holiday ? undefined : (e) => handleCellClick(e, student.id, day.dateStr, student.subject)}
+                      onClick={(isSelectingRange || !holiday) ? (e) => handleCellClick(e, student.id, day.dateStr, student.subject) : undefined}
                     >
                       {holiday ? (
                         <div className="w-7 h-7 mx-auto rounded bg-orange-100 border-2 border-orange-300 flex items-center justify-center text-xs font-medium text-orange-500">

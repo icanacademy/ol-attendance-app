@@ -104,6 +104,31 @@ exports.deleteAttendance = async (req, res) => {
   }
 };
 
+// Get class count for a date range
+exports.getClassCountRange = async (req, res) => {
+  try {
+    const { startDate, endDate, statuses, teacherId } = req.query;
+
+    if (!startDate || !endDate) {
+      return res.status(400).json({ error: 'startDate and endDate are required' });
+    }
+
+    // Parse statuses from comma-separated string
+    const statusList = statuses ? statuses.split(',').filter(s => s.trim()) : ['present'];
+
+    const result = await Attendance.getClassCountRange(
+      startDate,
+      endDate,
+      statusList,
+      teacherId ? parseInt(teacherId) : null
+    );
+    res.json(result);
+  } catch (error) {
+    console.error('Error fetching class count range:', error);
+    res.status(500).json({ error: 'Failed to fetch class count range' });
+  }
+};
+
 // Get monthly summary
 exports.getMonthlySummary = async (req, res) => {
   try {
