@@ -1,5 +1,10 @@
-const { Pool } = require('pg');
+const pg = require('pg');
+const { Pool } = pg;
 require('dotenv').config();
+
+// Configure pg to return DATE types as strings instead of Date objects
+// This prevents timezone conversion issues
+pg.types.setTypeParser(1082, (val) => val); // 1082 is the OID for DATE type
 
 const isProduction = process.env.NODE_ENV === 'production';
 

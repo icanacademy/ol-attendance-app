@@ -1,8 +1,4 @@
 const pool = require('../db/connection');
-const axios = require('axios');
-
-// Online Scheduler API URL
-const SCHEDULER_API_URL = process.env.SCHEDULER_API_URL || 'http://localhost:4488/api';
 
 // Helper function to extract Korean name from brackets in the name field
 // e.g., "Kim Ji Hye [김지혜]" -> "김지혜"
@@ -22,172 +18,199 @@ const getCleanDisplayName = (name) => {
 };
 
 class Attendance {
-  // Get all students from the online scheduler API with their primary teacher from database
+  // Get all student IDs that belong to the same person as the given student ID
+  // (grouped by notion_page_id or name+korean_name)
+  static async _getAllIdsForStudent(studentId) {
+    const result = await pool.query(`
+      WITH target AS (
+        SELECT COALESCE(notion_page_id, LOWER(name) || '::' || COALESCE(korean_name, '')) as identity_key
+        FROM students WHERE id = $1 LIMIT 1
+      )
+      SELECT s.id FROM students s, target t
+      WHERE COALESCE(s.notion_page_id, LOWER(s.name) || '::' || COALESCE(s.korean_name, '')) = t.identity_key
+    `, [studentId]);
+    return result.rows.map(r => r.id);
+  }
+
+  // Build a map of old student IDs -> canonical (current) student IDs
+  // Used to remap attendance/notes records when a student's ID changes due to schedule edits
+  static async _getIdRemapTable() {
+    const result = await pool.query(`
+      WITH canonical AS (
+        SELECT DISTINCT ON (
+          COALESCE(notion_page_id, LOWER(name) || '::' || COALESCE(korean_name, ''))
+        ) id as canonical_id,
+        COALESCE(notion_page_id, LOWER(name) || '::' || COALESCE(korean_name, '')) as identity_key
+        FROM students
+        WHERE is_active = true
+        ORDER BY COALESCE(notion_page_id, LOWER(name) || '::' || COALESCE(korean_name, '')),
+                 (CASE WHEN first_start_date IS NOT NULL THEN 0 ELSE 1 END),
+                 id ASC
+      ),
+      all_ids AS (
+        SELECT id,
+          COALESCE(notion_page_id, LOWER(name) || '::' || COALESCE(korean_name, '')) as identity_key
+        FROM students
+      )
+      SELECT a.id as old_id, c.canonical_id
+      FROM all_ids a
+      JOIN canonical c ON a.identity_key = c.identity_key
+      WHERE a.id != c.canonical_id
+    `);
+    const remap = {};
+    result.rows.forEach(row => {
+      remap[row.old_id] = row.canonical_id;
+    });
+    return remap;
+  }
+  // Get all active students directly from the shared database with their subjects/schedules
   // Returns one row per student-subject combination (students with multiple subjects get multiple rows)
   // If year and month are provided, filters hidden rows based on hidden_from date
   static async getStudentsWithClasses(year = null, month = null) {
     try {
-      // Fetch students from online scheduler API
-      // Use /all-active endpoint to get ALL students including those with duplicate names
-      const studentsResponse = await axios.get(`${SCHEDULER_API_URL}/students/all-active`);
-      const students = studentsResponse.data;
+      // Try to use the pre-computed cache first (much faster than the 5-table join)
+      try {
+        const cacheCheck = await pool.query(
+          `SELECT COUNT(*) as count, MAX(refreshed_at) as last_refresh FROM student_schedule_cache`
+        );
+        if (parseInt(cacheCheck.rows[0].count) > 0) {
+          return await this._getStudentsFromCache(year, month);
+        }
+      } catch (e) {
+        // Cache table doesn't exist yet, fall through to live query
+      }
 
+      // Fallback: Run all 3 queries in parallel: students, subjects+schedules, tuition subjects
+      const [studentsResult, subjectsResult, tuitionSubjectsResult] = await Promise.all([
+        // 1. Get all active students directly from shared DB (replaces HTTP call)
+        pool.query(
+          `SELECT DISTINCT ON (
+             COALESCE(notion_page_id, LOWER(name) || '::' || COALESCE(korean_name, ''))
+           ) id, name, korean_name, english_name, color_keyword, is_active
+           FROM students
+           WHERE is_active = true
+           ORDER BY COALESCE(notion_page_id, LOWER(name) || '::' || COALESCE(korean_name, '')),
+                    (CASE WHEN first_start_date IS NOT NULL THEN 0 ELSE 1 END),
+                    id ASC`
+        ),
+        // 2. Get all student-subject-schedule combos
+        pool.query(
+          `SELECT
+            s.id as student_id,
+            s.name as student_name,
+            a.subject,
+            t.name as teacher_name,
+            TO_CHAR(ts.start_time, 'HH:MI AM') as start_time,
+            TO_CHAR(ts.end_time, 'HH:MI AM') as end_time,
+            ARRAY_AGG(DISTINCT EXTRACT(DOW FROM a.date)::int ORDER BY EXTRACT(DOW FROM a.date)::int) as days
+          FROM assignment_students ast
+          JOIN students s ON s.id = ast.student_id
+          JOIN assignments a ON a.id = ast.assignment_id
+          JOIN time_slots ts ON ts.id = a.time_slot_id
+          LEFT JOIN assignment_teachers att ON att.assignment_id = a.id
+          LEFT JOIN teachers t ON t.id = att.teacher_id
+          WHERE a.is_active = true AND s.is_active = true
+          GROUP BY s.id, s.name, a.subject, t.name, ts.start_time, ts.end_time
+          ORDER BY s.name, a.subject, ts.start_time`
+        ),
+        // 3. Get additional subjects from tuition table
+        pool.query('SELECT DISTINCT student_id, subject FROM student_subject_tuition'),
+      ]);
 
-      // Get all subjects for each student from database
-      // This returns multiple rows per student if they have multiple subjects
-      // Group by time slot to show different schedules separately
-      const studentSubjectsQuery = `
-        SELECT
-          s.id as student_id,
-          s.name as student_name,
-          a.subject,
-          t.name as teacher_name,
-          TO_CHAR(ts.start_time, 'HH:MI AM') as start_time,
-          TO_CHAR(ts.end_time, 'HH:MI AM') as end_time,
-          ARRAY_AGG(DISTINCT EXTRACT(DOW FROM a.date)::int ORDER BY EXTRACT(DOW FROM a.date)::int) as days
-        FROM assignment_students ast
-        JOIN students s ON s.id = ast.student_id
-        JOIN assignments a ON a.id = ast.assignment_id
-        JOIN time_slots ts ON ts.id = a.time_slot_id
-        LEFT JOIN assignment_teachers att ON att.assignment_id = a.id
-        LEFT JOIN teachers t ON t.id = att.teacher_id
-        WHERE a.is_active = true AND s.is_active = true
-        GROUP BY s.id, s.name, a.subject, t.name, ts.start_time, ts.end_time
-        ORDER BY s.name, a.subject, ts.start_time
-      `;
-
-      let studentSubjectsMap = {}; // { student_id: [{ subject, teacher, schedules }] }
+      const students = studentsResult.rows;
       const dayNames = ['Su', 'M', 'T', 'W', 'Th', 'F', 'Sa'];
 
       // Helper function to merge consecutive time slots with the same days
-      // e.g., [7:00-7:30 MWF, 7:30-8:00 MWF] -> [7:00-8:00 MWF]
       const mergeConsecutiveSchedules = (schedules) => {
         if (!schedules || schedules.length === 0) return [];
-
-        // Sort by days first, then by start time
         const sorted = [...schedules].sort((a, b) => {
           if (a.days !== b.days) return a.days.localeCompare(b.days);
           return a.startTime.localeCompare(b.startTime);
         });
-
         const merged = [];
         let current = { ...sorted[0] };
-
         for (let i = 1; i < sorted.length; i++) {
           const next = sorted[i];
-          // Check if same days and consecutive times (current end == next start)
           if (current.days === next.days && current.endTime === next.startTime) {
-            // Merge: extend current end time
             current.endTime = next.endTime;
             current.time = `${current.startTime} - ${current.endTime}`;
           } else {
-            // Not consecutive, push current and start new
             merged.push({ time: current.time, days: current.days });
             current = { ...next };
           }
         }
-        // Push the last one
         merged.push({ time: current.time, days: current.days });
-
         return merged;
       };
 
-      try {
-        const result = await pool.query(studentSubjectsQuery);
-        result.rows.forEach(row => {
-          if (!studentSubjectsMap[row.student_id]) {
-            studentSubjectsMap[row.student_id] = [];
-          }
+      // Build student subjects map from query results
+      let studentSubjectsMap = {};
 
-          const daysStr = row.days ? row.days.map(d => dayNames[d]).join('') : null;
-          const scheduleEntry = {
-            time: row.start_time && row.end_time ? `${row.start_time} - ${row.end_time}` : null,
-            startTime: row.start_time || null,
-            endTime: row.end_time || null,
-            days: daysStr
-          };
+      subjectsResult.rows.forEach(row => {
+        if (!studentSubjectsMap[row.student_id]) {
+          studentSubjectsMap[row.student_id] = [];
+        }
+        const daysStr = row.days ? row.days.map(d => dayNames[d]).join('') : null;
+        const scheduleEntry = {
+          time: row.start_time && row.end_time ? `${row.start_time} - ${row.end_time}` : null,
+          startTime: row.start_time || null,
+          endTime: row.end_time || null,
+          days: daysStr
+        };
 
-          // Check if we already have this subject for this student
-          const existingSubject = studentSubjectsMap[row.student_id].find(
-            s => s.subject === row.subject
-          );
-
-          if (existingSubject) {
-            // Add this schedule to existing subject entry
-            if (scheduleEntry.time && scheduleEntry.days) {
-              existingSubject.schedules.push(scheduleEntry);
-            }
-          } else {
-            // Create new subject entry with schedules array
-            studentSubjectsMap[row.student_id].push({
-              subject: row.subject || null,
-              teacher_name: row.teacher_name || null,
-              schedules: scheduleEntry.time && scheduleEntry.days ? [scheduleEntry] : []
-            });
-          }
-        });
-
-        // Merge consecutive time slots for each student-subject
-        Object.values(studentSubjectsMap).forEach(subjects => {
-          subjects.forEach(subjectInfo => {
-            if (subjectInfo.schedules && subjectInfo.schedules.length > 0) {
-              subjectInfo.schedules = mergeConsecutiveSchedules(subjectInfo.schedules);
-            }
-          });
-        });
-      } catch (err) {
-        console.log('Could not fetch student subjects from database:', err.message);
-      }
-
-      // Also check student_subject_tuition table for any additional subjects
-      // (in case subjects were manually added there)
-      try {
-        const tuitionSubjectsResult = await pool.query(
-          'SELECT DISTINCT student_id, subject FROM student_subject_tuition'
+        const existingSubject = studentSubjectsMap[row.student_id].find(
+          s => s.subject === row.subject
         );
-        tuitionSubjectsResult.rows.forEach(row => {
-          if (!studentSubjectsMap[row.student_id]) {
-            studentSubjectsMap[row.student_id] = [];
+        if (existingSubject) {
+          if (scheduleEntry.time && scheduleEntry.days) {
+            existingSubject.schedules.push(scheduleEntry);
           }
-          // Add if not already present
-          const existingSubject = studentSubjectsMap[row.student_id].find(
-            s => s.subject === row.subject
-          );
-          if (!existingSubject) {
-            studentSubjectsMap[row.student_id].push({
-              subject: row.subject,
-              teacher_name: null,
-              schedule_time: null,
-              schedule_days: null
-            });
+        } else {
+          studentSubjectsMap[row.student_id].push({
+            subject: row.subject || null,
+            teacher_name: row.teacher_name || null,
+            schedules: scheduleEntry.time && scheduleEntry.days ? [scheduleEntry] : []
+          });
+        }
+      });
+
+      // Merge consecutive time slots
+      Object.values(studentSubjectsMap).forEach(subjects => {
+        subjects.forEach(subjectInfo => {
+          if (subjectInfo.schedules && subjectInfo.schedules.length > 0) {
+            subjectInfo.schedules = mergeConsecutiveSchedules(subjectInfo.schedules);
           }
         });
-      } catch (err) {
-        console.log('Could not fetch tuition subjects:', err.message);
-      }
+      });
+
+      // Add tuition-only subjects
+      tuitionSubjectsResult.rows.forEach(row => {
+        if (!studentSubjectsMap[row.student_id]) {
+          studentSubjectsMap[row.student_id] = [];
+        }
+        const existingSubject = studentSubjectsMap[row.student_id].find(
+          s => s.subject === row.subject
+        );
+        if (!existingSubject) {
+          studentSubjectsMap[row.student_id].push({
+            subject: row.subject,
+            teacher_name: null,
+            schedule_time: null,
+            schedule_days: null
+          });
+        }
+      });
 
       // Build result: one row per student-subject combination
       const result = [];
-
       students
         .filter(s => s.is_active)
         .forEach(student => {
           const subjects = studentSubjectsMap[student.id];
-
           if (subjects && subjects.length > 0) {
-            // Student has subjects - create one row per subject
             subjects.forEach(subjectInfo => {
-              // Format schedules array into display strings
-              // Each schedule entry has { time, days }
               const schedules = subjectInfo.schedules || [];
-
-              // Create formatted schedule strings for display
-              // e.g., ["M 4:00 PM - 4:50 PM", "TTh 5:00 PM - 5:50 PM"]
-              const formattedSchedules = schedules.map(s => ({
-                time: s.time,
-                days: s.days
-              }));
-
+              const formattedSchedules = schedules.map(s => ({ time: s.time, days: s.days }));
               result.push({
                 id: student.id,
                 name: student.name,
@@ -195,18 +218,14 @@ class Attendance {
                 english_name: student.english_name,
                 color_keyword: student.color_keyword,
                 teacher_name: subjectInfo.teacher_name,
-                // Keep backward compatibility with single schedule fields
                 schedule_time: schedules.length > 0 ? schedules[0].time : null,
                 schedule_days: schedules.length > 0 ? schedules[0].days : null,
-                // New: array of all schedules for this student-subject
                 schedules: formattedSchedules,
                 subject: subjectInfo.subject,
-                // Unique key for this student-subject row
                 row_key: `${student.id}-${subjectInfo.subject || 'default'}`
               });
             });
           } else {
-            // Student has no subjects - create a single row with no subject
             result.push({
               id: student.id,
               name: student.name,
@@ -223,36 +242,33 @@ class Attendance {
           }
         });
 
-      // Get hidden rows to filter them out
+      // Filter hidden rows in SQL when year/month provided, otherwise fetch all
       let hiddenRows = [];
       try {
-        const hiddenResult = await pool.query('SELECT student_id, subject, hidden_from_year, hidden_from_month FROM hidden_attendance_rows');
-        hiddenRows = hiddenResult.rows;
+        if (year && month) {
+          const viewDate = year * 12 + month;
+          const hiddenResult = await pool.query(
+            `SELECT student_id, subject FROM hidden_attendance_rows
+             WHERE (hidden_from_year IS NULL AND hidden_from_month IS NULL)
+                OR (hidden_from_year * 12 + hidden_from_month) <= $1`,
+            [viewDate]
+          );
+          hiddenRows = hiddenResult.rows;
+        } else {
+          const hiddenResult = await pool.query('SELECT student_id, subject FROM hidden_attendance_rows');
+          hiddenRows = hiddenResult.rows;
+        }
       } catch (err) {
         console.log('Could not fetch hidden rows (table may not exist yet):', err.message);
       }
 
-      // Filter out hidden rows based on date
-      // If year/month provided, only hide if hidden_from date <= current view date
+      // Build a Set for O(1) hidden row lookups
+      const hiddenSet = new Set(
+        hiddenRows.map(h => `${h.student_id}-${h.subject}`)
+      );
+
       const filteredResult = result.filter(student => {
-        const isHidden = hiddenRows.some(hidden => {
-          // Check if this hidden row matches the student
-          const matchesStudent = hidden.student_id === student.id &&
-            (hidden.subject === student.subject || (hidden.subject === null && student.subject === null));
-
-          if (!matchesStudent) return false;
-
-          // If no year/month provided or no hidden_from date, use legacy behavior (always hidden)
-          if (!year || !month || !hidden.hidden_from_year || !hidden.hidden_from_month) {
-            return true;
-          }
-
-          // Compare dates: hide only if current view is >= hidden_from date
-          const viewDate = year * 12 + month;
-          const hiddenFromDate = hidden.hidden_from_year * 12 + hidden.hidden_from_month;
-          return viewDate >= hiddenFromDate;
-        });
-        return !isHidden;
+        return !hiddenSet.has(`${student.id}-${student.subject}`);
       });
 
       // Sort by name then subject
@@ -262,111 +278,153 @@ class Attendance {
         return (a.subject || '').localeCompare(b.subject || '');
       });
     } catch (error) {
-      console.error('Error fetching students from online scheduler:', error.message);
-      throw new Error('Failed to fetch students from online scheduler. Make sure the online scheduler is running on port 4488.');
+      console.error('Error fetching students:', error.message);
+      throw new Error('Failed to fetch students from database.');
     }
   }
 
+  // Fast path: read from pre-computed cache table
+  static async _getStudentsFromCache(year = null, month = null) {
+    const cacheResult = await pool.query(
+      `SELECT student_id as id, student_name as name, korean_name, english_name,
+              color_keyword, subject, teacher_name, schedule_time, schedule_days,
+              schedules, row_key
+       FROM student_schedule_cache
+       ORDER BY student_name, subject`
+    );
+
+    const result = cacheResult.rows.map(row => ({
+      id: row.id,
+      name: row.name,
+      korean_name: row.korean_name,
+      english_name: row.english_name,
+      color_keyword: row.color_keyword,
+      teacher_name: row.teacher_name,
+      schedule_time: row.schedule_time,
+      schedule_days: row.schedule_days,
+      schedules: typeof row.schedules === 'string' ? JSON.parse(row.schedules) : (row.schedules || []),
+      subject: row.subject,
+      row_key: row.row_key
+    }));
+
+    // Apply hidden row filtering
+    let hiddenRows = [];
+    try {
+      if (year && month) {
+        const viewDate = year * 12 + month;
+        const hiddenResult = await pool.query(
+          `SELECT student_id, subject FROM hidden_attendance_rows
+           WHERE (hidden_from_year IS NULL AND hidden_from_month IS NULL)
+              OR (hidden_from_year * 12 + hidden_from_month) <= $1`,
+          [viewDate]
+        );
+        hiddenRows = hiddenResult.rows;
+      } else {
+        const hiddenResult = await pool.query('SELECT student_id, subject FROM hidden_attendance_rows');
+        hiddenRows = hiddenResult.rows;
+      }
+    } catch (err) {
+      // Table may not exist
+    }
+
+    const hiddenSet = new Set(hiddenRows.map(h => `${h.student_id}-${h.subject}`));
+    return result.filter(student => !hiddenSet.has(`${student.id}-${student.subject}`));
+  }
+
   // Get attendance records for a specific month
+  // Remaps student_ids so attendance records follow the student even if their ID changes
+  // (e.g., when schedule is edited and a new student record is created)
   static async getByMonth(year, month) {
     const startDate = `${year}-${String(month).padStart(2, '0')}-01`;
     const lastDay = new Date(year, month, 0).getDate();
     const endDate = `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
 
-    const query = `
-      SELECT
-        a.id,
-        a.student_id,
-        TO_CHAR(a.date, 'YYYY-MM-DD') as date,
-        a.status,
-        a.notes,
-        a.subject
-      FROM attendance a
-      WHERE a.date >= $1 AND a.date <= $2
-      ORDER BY a.date, a.student_id, a.subject
-    `;
-    const result = await pool.query(query, [startDate, endDate]);
-    return result.rows;
+    // Run attendance query and student ID remap in parallel
+    const [attendanceResult, idRemap] = await Promise.all([
+      pool.query(`
+        SELECT
+          a.id,
+          a.student_id,
+          TO_CHAR(a.date, 'YYYY-MM-DD') as date,
+          a.status,
+          a.notes,
+          a.subject
+        FROM attendance a
+        WHERE a.date >= $1 AND a.date <= $2
+        ORDER BY a.date, a.student_id, a.subject
+      `, [startDate, endDate]),
+      this._getIdRemapTable()
+    ]);
+
+    // Remap student_ids in attendance records
+    return attendanceResult.rows.map(row => ({
+      ...row,
+      student_id: idRemap[row.student_id] || row.student_id
+    }));
   }
 
   // Get class count for a date range grouped by teacher, student, and subject
   static async getClassCountRange(startDate, endDate, statuses = ['present'], teacherId = null) {
     try {
-      // First, get students from online scheduler to get teacher info
-      const studentsResponse = await axios.get(`${SCHEDULER_API_URL}/students/all-active`);
-      const allStudents = studentsResponse.data;
+      // Run student info + teacher mappings + attendance counts in parallel
+      const statusPlaceholders = statuses.map((_, i) => `$${i + 3}`).join(', ');
 
-      // Build a map of student_id to student info including teacher
+      const [studentInfoResult, teacherResult, attendanceResult] = await Promise.all([
+        // 1. Get student info directly from shared DB
+        pool.query(
+          `SELECT DISTINCT ON (
+             COALESCE(notion_page_id, LOWER(name) || '::' || COALESCE(korean_name, ''))
+           ) id, name, korean_name, english_name
+           FROM students WHERE is_active = true
+           ORDER BY COALESCE(notion_page_id, LOWER(name) || '::' || COALESCE(korean_name, '')),
+                    (CASE WHEN first_start_date IS NOT NULL THEN 0 ELSE 1 END), id ASC`
+        ),
+        // 2. Get student-teacher mappings
+        pool.query(
+          `SELECT DISTINCT ON (s.id)
+            s.id as student_id, t.id as teacher_id, t.name as teacher_name
+          FROM assignment_students ast
+          JOIN students s ON s.id = ast.student_id
+          JOIN assignments a ON a.id = ast.assignment_id
+          LEFT JOIN assignment_teachers att ON att.assignment_id = a.id
+          LEFT JOIN teachers t ON t.id = att.teacher_id
+          WHERE a.is_active = true AND s.is_active = true
+          ORDER BY s.id, COUNT(*) OVER (PARTITION BY s.id, t.id) DESC`
+        ),
+        // 3. Get attendance counts
+        pool.query(
+          `SELECT student_id, subject, COUNT(*) as class_count
+           FROM attendance
+           WHERE date >= $1 AND date <= $2 AND status IN (${statusPlaceholders})
+           GROUP BY student_id, subject
+           ORDER BY student_id, subject`,
+          [startDate, endDate, ...statuses]
+        ),
+      ]);
+
+      // Build maps
       const studentInfoMap = {};
-      allStudents.forEach(s => {
-        studentInfoMap[s.id] = {
-          name: s.name,
-          korean_name: s.korean_name,
-          english_name: s.english_name
-        };
+      studentInfoResult.rows.forEach(s => {
+        studentInfoMap[s.id] = { name: s.name, korean_name: s.korean_name, english_name: s.english_name };
       });
 
-      // Get teacher assignments from database
-      const teacherQuery = `
-        SELECT DISTINCT
-          s.id as student_id,
-          t.id as teacher_id,
-          t.name as teacher_name
-        FROM assignment_students ast
-        JOIN students s ON s.id = ast.student_id
-        JOIN assignments a ON a.id = ast.assignment_id
-        LEFT JOIN assignment_teachers att ON att.assignment_id = a.id
-        LEFT JOIN teachers t ON t.id = att.teacher_id
-        WHERE a.is_active = true AND s.is_active = true
-      `;
-
-      let studentTeacherMap = {}; // student_id -> { teacherId, teacherName }
-      try {
-        const teacherResult = await pool.query(teacherQuery);
-        teacherResult.rows.forEach(row => {
-          if (!studentTeacherMap[row.student_id]) {
-            studentTeacherMap[row.student_id] = {
-              teacherId: row.teacher_id,
-              teacherName: row.teacher_name
-            };
-          }
-        });
-      } catch (err) {
-        console.log('Could not fetch teacher assignments:', err.message);
-      }
-
-      // Build the attendance count query with dynamic status filter
-      const statusPlaceholders = statuses.map((_, i) => `$${i + 3}`).join(', ');
-      const query = `
-        SELECT
-          a.student_id,
-          a.subject,
-          COUNT(*) as class_count
-        FROM attendance a
-        WHERE a.date >= $1 AND a.date <= $2
-          AND a.status IN (${statusPlaceholders})
-        GROUP BY a.student_id, a.subject
-        ORDER BY a.student_id, a.subject
-      `;
-
-      const params = [startDate, endDate, ...statuses];
-      const result = await pool.query(query, params);
+      const studentTeacherMap = {};
+      teacherResult.rows.forEach(row => {
+        if (!studentTeacherMap[row.student_id]) {
+          studentTeacherMap[row.student_id] = { teacherId: row.teacher_id, teacherName: row.teacher_name };
+        }
+      });
 
       // Group results by teacher
       const teacherGroups = {};
-
-      result.rows.forEach(row => {
+      attendanceResult.rows.forEach(row => {
         const studentId = row.student_id;
         const teacherInfo = studentTeacherMap[studentId] || { teacherId: null, teacherName: 'Unknown Teacher' };
         const studentInfo = studentInfoMap[studentId] || { name: `Student ${studentId}` };
 
-        // Apply teacher filter if specified
-        if (teacherId && teacherInfo.teacherId !== teacherId) {
-          return;
-        }
+        if (teacherId && teacherInfo.teacherId !== teacherId) return;
 
         const teacherKey = teacherInfo.teacherId || 'unknown';
-
         if (!teacherGroups[teacherKey]) {
           teacherGroups[teacherKey] = {
             teacherId: teacherInfo.teacherId,
@@ -378,23 +436,18 @@ class Attendance {
 
         const classCount = parseInt(row.class_count);
         teacherGroups[teacherKey].students.push({
-          studentId: studentId,
-          studentName: getCleanDisplayName(studentInfo.name),
-          koreanName: studentInfo.korean_name,
-          subject: row.subject,
-          classCount: classCount
+          studentId, studentName: getCleanDisplayName(studentInfo.name),
+          koreanName: studentInfo.korean_name, subject: row.subject, classCount
         });
         teacherGroups[teacherKey].totalClasses += classCount;
       });
 
-      // Convert to array and sort by teacher name
       const teachers = Object.values(teacherGroups).sort((a, b) => {
         if (!a.teacherName) return 1;
         if (!b.teacherName) return -1;
         return a.teacherName.localeCompare(b.teacherName);
       });
 
-      // Sort students within each teacher by name
       teachers.forEach(teacher => {
         teacher.students.sort((a, b) => a.studentName.localeCompare(b.studentName));
       });
@@ -443,19 +496,32 @@ class Attendance {
   }
 
   // Toggle attendance status (cycles: present -> absent -> ta -> noshow -> clear)
+  // Checks all IDs for the same student in case their ID changed due to schedule edits
   static async toggleAttendance(studentId, date, subject = null) {
-    // First check if record exists
+    // Get all IDs for this student (handles ID changes from schedule edits)
+    const allIds = await this._getAllIdsForStudent(studentId);
+
+    // Check if record exists under any of the student's IDs
     const checkQuery = `
-      SELECT id, status FROM attendance
-      WHERE student_id = $1 AND date = $2 AND (subject = $3 OR (subject IS NULL AND $3 IS NULL))
+      SELECT id, student_id, status FROM attendance
+      WHERE student_id = ANY($1) AND date = $2 AND (subject = $3 OR (subject IS NULL AND $3 IS NULL))
+      LIMIT 1
     `;
-    const existing = await pool.query(checkQuery, [studentId, date, subject]);
+    const existing = await pool.query(checkQuery, [allIds.length > 0 ? allIds : [studentId], date, subject]);
 
     if (existing.rows.length === 0) {
       // No record exists, create as present
       return this.setAttendance(studentId, date, 'present', null, subject);
     } else {
-      const currentStatus = existing.rows[0].status;
+      const existingRecord = existing.rows[0];
+      const currentStatus = existingRecord.status;
+      const recordStudentId = existingRecord.student_id;
+
+      // If the record is under an old ID, migrate it to the current ID
+      if (recordStudentId !== studentId) {
+        await pool.query('UPDATE attendance SET student_id = $1 WHERE id = $2', [studentId, existingRecord.id]);
+      }
+
       // Cycle: present -> absent -> ta -> noshow -> delete (clear)
       if (currentStatus === 'present') {
         return this.setAttendance(studentId, date, 'absent', null, subject);
@@ -472,13 +538,15 @@ class Attendance {
   }
 
   // Delete attendance record - now supports subject
+  // Checks all IDs for the same student in case their ID changed
   static async delete(studentId, date, subject = null) {
+    const allIds = await this._getAllIdsForStudent(studentId);
     const query = `
       DELETE FROM attendance
-      WHERE student_id = $1 AND date = $2 AND (subject = $3 OR (subject IS NULL AND $3 IS NULL))
+      WHERE student_id = ANY($1) AND date = $2 AND (subject = $3 OR (subject IS NULL AND $3 IS NULL))
       RETURNING *
     `;
-    const result = await pool.query(query, [studentId, date, subject]);
+    const result = await pool.query(query, [allIds.length > 0 ? allIds : [studentId], date, subject]);
     return result.rows[0];
   }
 
@@ -521,65 +589,53 @@ class Attendance {
     return result.rows;
   }
 
-  // Get teacher assignments for students by month from online scheduler API
+  // Get teacher assignments for students by month directly from shared database
   // Returns which teacher(s) each student has on each date
   static async getTeacherAssignments(year, month) {
     const startDate = `${year}-${String(month).padStart(2, '0')}-01`;
     const lastDay = new Date(year, month, 0).getDate();
+    const endDate = `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
 
     try {
-      const response = await axios.get(`${SCHEDULER_API_URL}/assignments/date-range`, {
-        params: { startDate, daysCount: lastDay }
-      });
+      const result = await pool.query(
+        `SELECT
+          ast.student_id,
+          TO_CHAR(a.date, 'YYYY-MM-DD') as date,
+          STRING_AGG(DISTINCT t.name, ', ' ORDER BY t.name) as teachers
+        FROM assignments a
+        JOIN assignment_students ast ON a.id = ast.assignment_id
+        JOIN assignment_teachers att ON a.id = att.assignment_id
+        JOIN teachers t ON att.teacher_id = t.id
+        WHERE a.is_active = true
+          AND a.date >= $1 AND a.date <= $2
+        GROUP BY ast.student_id, a.date
+        ORDER BY a.date, ast.student_id`,
+        [startDate, endDate]
+      );
 
-      const assignments = response.data;
-
-      // Transform assignments to the format expected by the attendance app
-      // Group by student_id and date, collecting teacher names
-      const teacherMap = {};
-
-      assignments.forEach(assignment => {
-        if (!assignment.is_active) return;
-
-        assignment.students.forEach(student => {
-          const date = assignment.date.split('T')[0];
-          const key = `${student.id}-${date}`;
-
-          if (!teacherMap[key]) {
-            teacherMap[key] = {
-              student_id: student.id,
-              date,
-              teacherSet: new Set()
-            };
-          }
-
-          assignment.teachers.forEach(teacher => {
-            teacherMap[key].teacherSet.add(teacher.name);
-          });
-        });
-      });
-
-      // Convert to array and format teachers as comma-separated string
-      return Object.values(teacherMap).map(item => ({
-        student_id: item.student_id,
-        date: item.date,
-        teachers: Array.from(item.teacherSet).sort().join(', ')
-      }));
+      return result.rows;
     } catch (error) {
-      console.error('Error fetching teacher assignments from online scheduler:', error.message);
-      return []; // Return empty array if API fails
+      console.error('Error fetching teacher assignments:', error.message);
+      return [];
     }
   }
 
   // Get notes for all students for a specific month
+  // Remaps student_ids to canonical IDs (same as getByMonth)
   static async getNotesByMonth(year, month) {
-    const query = `
-      SELECT student_id, notes, subject
-      FROM student_notes
-      WHERE year = $1 AND month = $2
-    `;
-    const result = await pool.query(query, [year, month]);
-    return result.rows;
+    const [notesResult, idRemap] = await Promise.all([
+      pool.query(`
+        SELECT student_id, notes, subject
+        FROM student_notes
+        WHERE year = $1 AND month = $2
+      `, [year, month]),
+      this._getIdRemapTable()
+    ]);
+
+    return notesResult.rows.map(row => ({
+      ...row,
+      student_id: idRemap[row.student_id] || row.student_id
+    }));
   }
 
   // Set note for a student (create or update) - now supports subject
@@ -749,65 +805,49 @@ class Attendance {
   // Get students with tuition and payment info for a month
   static async getStudentsWithTuition(year, month) {
     try {
-      // Get students from online scheduler
-      const students = await this.getStudentsWithClasses();
-
-      // Get all price per class rates and currencies
-      const tuitionResult = await pool.query('SELECT student_id, price_per_class, currency FROM student_tuition');
-      const tuitionMap = {};
-      tuitionResult.rows.forEach(row => {
-        tuitionMap[row.student_id] = {
-          price_per_class: parseFloat(row.price_per_class),
-          currency: row.currency || 'PHP'
-        };
-      });
-
-      // Get attendance counts for this month (only 'present' status)
       const startDate = `${year}-${String(month).padStart(2, '0')}-01`;
       const lastDay = new Date(year, month, 0).getDate();
       const endDate = `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
 
-      const attendanceResult = await pool.query(
-        `SELECT student_id, COUNT(*) as present_count
-         FROM attendance
-         WHERE date >= $1 AND date <= $2 AND status = 'present'
-         GROUP BY student_id`,
-        [startDate, endDate]
-      );
-      const attendanceMap = {};
-      attendanceResult.rows.forEach(row => {
-        attendanceMap[row.student_id] = parseInt(row.present_count);
+      // Run students + tuition/attendance/payments in parallel
+      const [students, tuitionResult, attendanceResult, paymentsResult] = await Promise.all([
+        this.getStudentsWithClasses(),
+        pool.query('SELECT student_id, price_per_class, currency FROM student_tuition'),
+        pool.query(
+          `SELECT student_id, COUNT(*) as present_count
+           FROM attendance WHERE date >= $1 AND date <= $2 AND status = 'present'
+           GROUP BY student_id`,
+          [startDate, endDate]
+        ),
+        pool.query(
+          `SELECT student_id, paid, TO_CHAR(payment_date, 'YYYY-MM-DD') as payment_date, notes
+           FROM tuition_payments WHERE year = $1 AND month = $2`,
+          [year, month]
+        ),
+      ]);
+
+      const tuitionMap = {};
+      tuitionResult.rows.forEach(row => {
+        tuitionMap[row.student_id] = { price_per_class: parseFloat(row.price_per_class), currency: row.currency || 'PHP' };
       });
 
-      // Get all payments for this month
-      const paymentsResult = await pool.query(
-        `SELECT student_id, paid, TO_CHAR(payment_date, 'YYYY-MM-DD') as payment_date, notes
-         FROM tuition_payments WHERE year = $1 AND month = $2`,
-        [year, month]
-      );
+      const attendanceMap = {};
+      attendanceResult.rows.forEach(row => { attendanceMap[row.student_id] = parseInt(row.present_count); });
+
       const paymentsMap = {};
       paymentsResult.rows.forEach(row => {
-        paymentsMap[row.student_id] = {
-          paid: row.paid,
-          payment_date: row.payment_date,
-          notes: row.notes
-        };
+        paymentsMap[row.student_id] = { paid: row.paid, payment_date: row.payment_date, notes: row.notes };
       });
 
-      // Merge data and calculate total tuition
       return students.map(student => {
         const tuitionInfo = tuitionMap[student.id] || { price_per_class: 0, currency: 'PHP' };
-        const pricePerClass = tuitionInfo.price_per_class;
-        const currency = tuitionInfo.currency;
         const presentCount = attendanceMap[student.id] || 0;
-        const totalTuition = pricePerClass * presentCount;
-
         return {
           ...student,
-          price_per_class: pricePerClass,
-          currency: currency,
+          price_per_class: tuitionInfo.price_per_class,
+          currency: tuitionInfo.currency,
           present_count: presentCount,
-          total_tuition: totalTuition,
+          total_tuition: tuitionInfo.price_per_class * presentCount,
           paid: paymentsMap[student.id]?.paid || false,
           payment_date: paymentsMap[student.id]?.payment_date || null,
           payment_notes: paymentsMap[student.id]?.notes || null
@@ -1117,94 +1157,58 @@ class Attendance {
   // Returns one row per student-subject combination
   static async getStudentsWithSubjectTuition(year, month) {
     try {
-      // Get students from online scheduler
-      const students = await this.getStudentsWithClasses();
-
-      // Get all subject tuition rates
-      const tuitionResult = await pool.query(
-        'SELECT student_id, subject, price_per_class, currency FROM student_subject_tuition'
-      );
-      const tuitionMap = {};
-      tuitionResult.rows.forEach(row => {
-        const key = `${row.student_id}-${row.subject}`;
-        tuitionMap[key] = {
-          price_per_class: parseFloat(row.price_per_class),
-          currency: row.currency || 'PHP'
-        };
-      });
-
-      // Get attendance counts for this month (only 'present' status)
       const startDate = `${year}-${String(month).padStart(2, '0')}-01`;
       const lastDay = new Date(year, month, 0).getDate();
       const endDate = `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
 
-      const attendanceResult = await pool.query(
-        `SELECT student_id, COUNT(*) as present_count
-         FROM attendance
-         WHERE date >= $1 AND date <= $2 AND status = 'present'
-         GROUP BY student_id`,
-        [startDate, endDate]
-      );
-      const attendanceMap = {};
-      attendanceResult.rows.forEach(row => {
-        attendanceMap[row.student_id] = parseInt(row.present_count);
-      });
+      // Run students + all supporting queries in parallel
+      const [students, tuitionResult, attendanceResult, paymentsResult] = await Promise.all([
+        this.getStudentsWithClasses(),
+        // Tuition rates already include student-subject combos, no need for separate query
+        pool.query('SELECT student_id, subject, price_per_class, currency FROM student_subject_tuition'),
+        pool.query(
+          `SELECT student_id, COUNT(*) as present_count
+           FROM attendance WHERE date >= $1 AND date <= $2 AND status = 'present'
+           GROUP BY student_id`,
+          [startDate, endDate]
+        ),
+        pool.query(
+          `SELECT student_id, subject, paid, TO_CHAR(payment_date, 'YYYY-MM-DD') as payment_date, notes
+           FROM subject_tuition_payments WHERE year = $1 AND month = $2`,
+          [year, month]
+        ),
+      ]);
 
-      // Get all subject payments for this month
-      const paymentsResult = await pool.query(
-        `SELECT student_id, subject, paid, TO_CHAR(payment_date, 'YYYY-MM-DD') as payment_date, notes
-         FROM subject_tuition_payments WHERE year = $1 AND month = $2`,
-        [year, month]
-      );
-      const paymentsMap = {};
-      paymentsResult.rows.forEach(row => {
-        const key = `${row.student_id}-${row.subject}`;
-        paymentsMap[key] = {
-          paid: row.paid,
-          payment_date: row.payment_date,
-          notes: row.notes
-        };
-      });
-
-      // Get all student-subject combinations from tuition table
-      const studentSubjectsResult = await pool.query(
-        'SELECT DISTINCT student_id, subject FROM student_subject_tuition ORDER BY student_id, subject'
-      );
+      const tuitionMap = {};
       const studentSubjects = {};
-      studentSubjectsResult.rows.forEach(row => {
-        if (!studentSubjects[row.student_id]) {
-          studentSubjects[row.student_id] = [];
-        }
+      tuitionResult.rows.forEach(row => {
+        const key = `${row.student_id}-${row.subject}`;
+        tuitionMap[key] = { price_per_class: parseFloat(row.price_per_class), currency: row.currency || 'PHP' };
+        if (!studentSubjects[row.student_id]) studentSubjects[row.student_id] = [];
         studentSubjects[row.student_id].push(row.subject);
       });
 
-      // Build result: one row per student-subject
+      const attendanceMap = {};
+      attendanceResult.rows.forEach(row => { attendanceMap[row.student_id] = parseInt(row.present_count); });
+
+      const paymentsMap = {};
+      paymentsResult.rows.forEach(row => {
+        paymentsMap[`${row.student_id}-${row.subject}`] = { paid: row.paid, payment_date: row.payment_date, notes: row.notes };
+      });
+
       const result = [];
-
       students.forEach(student => {
-        // Get subjects for this student from tuition table
         let subjects = studentSubjects[student.id] ? [...studentSubjects[student.id]] : [];
-
-        // Always include the student's default subject from scheduler if they have one
-        // This ensures the default subject is shown even after adding other subjects
         if (student.subject && !subjects.includes(student.subject)) {
-          subjects.unshift(student.subject); // Add at beginning so default shows first
+          subjects.unshift(student.subject);
         }
-
-        // If still no subjects, create a default entry
-        if (subjects.length === 0) {
-          subjects = ['(No Subject)'];
-        }
+        if (subjects.length === 0) subjects = ['(No Subject)'];
 
         const presentCount = attendanceMap[student.id] || 0;
 
         subjects.forEach(subject => {
           const key = `${student.id}-${subject}`;
           const tuitionInfo = tuitionMap[key] || { price_per_class: 0, currency: 'PHP' };
-          const pricePerClass = tuitionInfo.price_per_class;
-          const currency = tuitionInfo.currency;
-          const totalTuition = pricePerClass * presentCount;
-
           result.push({
             id: key,
             student_id: student.id,
@@ -1212,11 +1216,11 @@ class Attendance {
             korean_name: student.korean_name,
             english_name: student.english_name,
             teacher_name: student.teacher_name,
-            subject: subject,
-            price_per_class: pricePerClass,
-            currency: currency,
+            subject,
+            price_per_class: tuitionInfo.price_per_class,
+            currency: tuitionInfo.currency,
             present_count: presentCount,
-            total_tuition: totalTuition,
+            total_tuition: tuitionInfo.price_per_class * presentCount,
             paid: paymentsMap[key]?.paid || false,
             payment_date: paymentsMap[key]?.payment_date || null,
             payment_notes: paymentsMap[key]?.notes || null
