@@ -2,25 +2,31 @@ import React, { useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import MonthTabs from './components/MonthTabs';
 import AttendanceGrid from './components/AttendanceGrid';
+import AttendanceSummary from './components/AttendanceSummary';
 import AdminPanel from './components/AdminPanel';
 import ClassCountModal from './components/ClassCountModal';
-import { getStudents, getMonthlyAttendance, getNotes, getHolidaysByMonth, verifyAdmin, warmupApi } from './services/api';
+import TeacherDashboard from './components/TeacherDashboard';
+import { getStudents, getMonthlyAttendance, getNotes, getHolidaysByMonth, verifyAdmin, warmupApi, restoreAdminToken, clearAdminToken } from './services/api';
 
 function App() {
   const today = new Date();
   const [selectedYear, setSelectedYear] = useState(today.getFullYear());
   const [selectedMonth, setSelectedMonth] = useState(today.getMonth() + 1);
 
-  // Warm up the API on app load to reduce cold start delays
+  // Warm up the API and restore admin token on app load
   useEffect(() => {
     warmupApi();
+    if (restoreAdminToken()) {
+      setAdminPassword('restored');
+    }
   }, []);
-  const [activeTab, setActiveTab] = useState('attendance'); // 'attendance' or 'admin'
+  const [activeTab, setActiveTab] = useState('attendance'); // 'attendance', 'teacher', or 'admin'
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [passwordInput, setPasswordInput] = useState('');
   const [passwordError, setPasswordError] = useState('');
   const [adminPassword, setAdminPassword] = useState(null);
   const [selectedTeacher, setSelectedTeacher] = useState(''); // Teacher filter
+  const [viewMode, setViewMode] = useState('grid'); // 'grid' or 'summary' (within attendance tab)
 
   // Date range selection for class count
   const [isSelectingRange, setIsSelectingRange] = useState(false);
@@ -117,6 +123,7 @@ function App() {
   };
 
   const handleAdminLogout = () => {
+    clearAdminToken();
     setAdminPassword(null);
     setActiveTab('attendance');
   };
@@ -198,6 +205,16 @@ function App() {
                   }`}
                 >
                   Attendance
+                </button>
+                <button
+                  onClick={() => setActiveTab('teacher')}
+                  className={`px-4 py-2 rounded-md text-sm font-medium transition-colors ${
+                    activeTab === 'teacher'
+                      ? 'bg-white text-gray-900 shadow-sm'
+                      : 'text-gray-600 hover:text-gray-900'
+                  }`}
+                >
+                  Teacher
                 </button>
                 <button
                   onClick={handleAdminTabClick}
@@ -295,6 +312,30 @@ function App() {
                 <div className="text-gray-500">
                   {filteredStudents.length}{selectedTeacher ? ` of ${students.length}` : ''} students
                 </div>
+                <span className="text-gray-300">|</span>
+                {/* Grid / Summary Toggle */}
+                <div className="flex gap-1 bg-gray-100 p-0.5 rounded-md">
+                  <button
+                    onClick={() => setViewMode('grid')}
+                    className={`px-2.5 py-1 rounded text-xs font-medium transition-colors ${
+                      viewMode === 'grid'
+                        ? 'bg-white text-gray-900 shadow-sm'
+                        : 'text-gray-500 hover:text-gray-700'
+                    }`}
+                  >
+                    Grid
+                  </button>
+                  <button
+                    onClick={() => setViewMode('summary')}
+                    className={`px-2.5 py-1 rounded text-xs font-medium transition-colors ${
+                      viewMode === 'summary'
+                        ? 'bg-white text-gray-900 shadow-sm'
+                        : 'text-gray-500 hover:text-gray-700'
+                    }`}
+                  >
+                    Summary
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -313,47 +354,62 @@ function App() {
 
           {/* Main Content */}
           <main className="p-4 overflow-x-auto">
-            <AttendanceGrid
-              students={filteredStudents}
-              attendance={attendance}
-              notes={notes}
-              holidays={holidays}
-              year={selectedYear}
-              month={selectedMonth}
-              isLoading={isLoading}
-              isSelectingRange={isSelectingRange}
-              rangeStartDate={rangeStartDate}
-              rangeEndDate={rangeEndDate}
-              onDateRangeSelect={handleDateRangeSelect}
-            />
+            {viewMode === 'grid' ? (
+              <>
+                <AttendanceGrid
+                  students={filteredStudents}
+                  attendance={attendance}
+                  notes={notes}
+                  holidays={holidays}
+                  year={selectedYear}
+                  month={selectedMonth}
+                  isLoading={isLoading}
+                  isSelectingRange={isSelectingRange}
+                  rangeStartDate={rangeStartDate}
+                  rangeEndDate={rangeEndDate}
+                  onDateRangeSelect={handleDateRangeSelect}
+                />
 
-            {/* Legend */}
-            <div className="mt-4 flex items-center justify-center gap-6 text-sm text-gray-600">
-              <div className="flex items-center gap-2">
-                <div className="w-6 h-6 rounded-full bg-green-500 flex items-center justify-center text-white text-xs">P</div>
-                <span>Present</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <div className="w-6 h-6 rounded-full bg-red-500 flex items-center justify-center text-white text-xs">A</div>
-                <span>Absent</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <div className="w-6 h-6 rounded-full bg-blue-500 flex items-center justify-center text-white text-xs">TA</div>
-                <span>Teacher's Absence</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <div className="w-6 h-6 rounded-full bg-gray-200 flex items-center justify-center text-gray-400 text-xs">-</div>
-                <span>Not marked</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <div className="w-6 h-6 rounded bg-orange-100 border-2 border-orange-300 flex items-center justify-center text-orange-500 text-xs">H</div>
-                <span>Holiday</span>
-              </div>
-              <span className="text-gray-400">|</span>
-              <span>Click a cell to select status</span>
-            </div>
+                {/* Legend */}
+                <div className="mt-4 flex items-center justify-center gap-6 text-sm text-gray-600">
+                  <div className="flex items-center gap-2">
+                    <div className="w-6 h-6 rounded-full bg-green-500 flex items-center justify-center text-white text-xs">P</div>
+                    <span>Present</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="w-6 h-6 rounded-full bg-red-500 flex items-center justify-center text-white text-xs">A</div>
+                    <span>Absent</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="w-6 h-6 rounded-full bg-blue-500 flex items-center justify-center text-white text-xs">TA</div>
+                    <span>Teacher's Absence</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="w-6 h-6 rounded-full bg-gray-200 flex items-center justify-center text-gray-400 text-xs">-</div>
+                    <span>Not marked</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="w-6 h-6 rounded bg-orange-100 border-2 border-orange-300 flex items-center justify-center text-orange-500 text-xs">H</div>
+                    <span>Holiday</span>
+                  </div>
+                  <span className="text-gray-400">|</span>
+                  <span>Click a cell to select status</span>
+                </div>
+              </>
+            ) : (
+              <AttendanceSummary
+                students={filteredStudents}
+                attendance={attendance}
+                holidays={holidays}
+                year={selectedYear}
+                month={selectedMonth}
+                isLoading={isLoading}
+              />
+            )}
           </main>
         </>
+      ) : activeTab === 'teacher' ? (
+        <TeacherDashboard />
       ) : (
         <AdminPanel adminPassword={adminPassword} onLogout={handleAdminLogout} />
       )}

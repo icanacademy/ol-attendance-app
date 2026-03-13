@@ -102,7 +102,14 @@ class Attendance {
             t.name as teacher_name,
             TO_CHAR(ts.start_time, 'HH:MI AM') as start_time,
             TO_CHAR(ts.end_time, 'HH:MI AM') as end_time,
-            ARRAY_AGG(DISTINCT EXTRACT(DOW FROM a.date)::int ORDER BY EXTRACT(DOW FROM a.date)::int) as days
+            ARRAY_AGG(DISTINCT CASE a.date
+              WHEN 'Sunday' THEN 0 WHEN 'Monday' THEN 1 WHEN 'Tuesday' THEN 2
+              WHEN 'Wednesday' THEN 3 WHEN 'Thursday' THEN 4 WHEN 'Friday' THEN 5
+              WHEN 'Saturday' THEN 6 END
+              ORDER BY CASE a.date
+              WHEN 'Sunday' THEN 0 WHEN 'Monday' THEN 1 WHEN 'Tuesday' THEN 2
+              WHEN 'Wednesday' THEN 3 WHEN 'Thursday' THEN 4 WHEN 'Friday' THEN 5
+              WHEN 'Saturday' THEN 6 END) as days
           FROM assignment_students ast
           JOIN students s ON s.id = ast.student_id
           JOIN assignments a ON a.id = ast.assignment_id
@@ -350,7 +357,7 @@ class Attendance {
           a.notes,
           a.subject
         FROM attendance a
-        WHERE a.date >= $1 AND a.date <= $2
+        WHERE a.date >= $1 AND a.date <= $2 AND a.is_deleted = false
         ORDER BY a.date, a.student_id, a.subject
       `, [startDate, endDate]),
       this._getIdRemapTable()
@@ -395,7 +402,7 @@ class Attendance {
         pool.query(
           `SELECT student_id, subject, COUNT(*) as class_count
            FROM attendance
-           WHERE date >= $1 AND date <= $2 AND status IN (${statusPlaceholders})
+           WHERE date >= $1 AND date <= $2 AND status IN (${statusPlaceholders}) AND is_deleted = false
            GROUP BY student_id, subject
            ORDER BY student_id, subject`,
           [startDate, endDate, ...statuses]
@@ -472,7 +479,7 @@ class Attendance {
         a.status,
         a.notes
       FROM attendance a
-      WHERE a.student_id = $1 AND a.date >= $2 AND a.date <= $3
+      WHERE a.student_id = $1 AND a.date >= $2 AND a.date <= $3 AND a.is_deleted = false
       ORDER BY a.date
     `;
     const result = await pool.query(query, [studentId, startDate, endDate]);
@@ -480,6 +487,7 @@ class Attendance {
   }
 
   // Set attendance (create or update) - now supports subject
+  // Also revives soft-deleted rows for the same (student_id, date, subject) combo
   static async setAttendance(studentId, date, status, notes = null, subject = null) {
     const query = `
       INSERT INTO attendance (student_id, date, status, notes, subject, updated_at)
@@ -488,6 +496,8 @@ class Attendance {
       DO UPDATE SET
         status = EXCLUDED.status,
         notes = EXCLUDED.notes,
+        is_deleted = false,
+        deleted_at = NULL,
         updated_at = CURRENT_TIMESTAMP
       RETURNING *, TO_CHAR(date, 'YYYY-MM-DD') as date
     `;
@@ -501,10 +511,10 @@ class Attendance {
     // Get all IDs for this student (handles ID changes from schedule edits)
     const allIds = await this._getAllIdsForStudent(studentId);
 
-    // Check if record exists under any of the student's IDs
+    // Check if record exists under any of the student's IDs (exclude soft-deleted)
     const checkQuery = `
       SELECT id, student_id, status FROM attendance
-      WHERE student_id = ANY($1) AND date = $2 AND (subject = $3 OR (subject IS NULL AND $3 IS NULL))
+      WHERE student_id = ANY($1) AND date = $2 AND (subject = $3 OR (subject IS NULL AND $3 IS NULL)) AND is_deleted = false
       LIMIT 1
     `;
     const existing = await pool.query(checkQuery, [allIds.length > 0 ? allIds : [studentId], date, subject]);
@@ -537,17 +547,43 @@ class Attendance {
     }
   }
 
-  // Delete attendance record - now supports subject
+  // Soft delete attendance record - now supports subject
   // Checks all IDs for the same student in case their ID changed
   static async delete(studentId, date, subject = null) {
     const allIds = await this._getAllIdsForStudent(studentId);
     const query = `
-      DELETE FROM attendance
-      WHERE student_id = ANY($1) AND date = $2 AND (subject = $3 OR (subject IS NULL AND $3 IS NULL))
-      RETURNING *
+      UPDATE attendance SET is_deleted = true, deleted_at = NOW()
+      WHERE student_id = ANY($1) AND date = $2 AND (subject = $3 OR (subject IS NULL AND $3 IS NULL)) AND is_deleted = false
+      RETURNING *, TO_CHAR(date, 'YYYY-MM-DD') as date
     `;
     const result = await pool.query(query, [allIds.length > 0 ? allIds : [studentId], date, subject]);
     return result.rows[0];
+  }
+
+  // Undo a soft delete - restore a recently deleted attendance record
+  static async undoDelete(studentId, date, subject = null) {
+    const allIds = await this._getAllIdsForStudent(studentId);
+    const query = `
+      UPDATE attendance SET is_deleted = false, deleted_at = NULL
+      WHERE student_id = ANY($1) AND date = $2 AND (subject = $3 OR (subject IS NULL AND $3 IS NULL)) AND is_deleted = true
+      RETURNING *, TO_CHAR(date, 'YYYY-MM-DD') as date
+    `;
+    const result = await pool.query(query, [allIds.length > 0 ? allIds : [studentId], date, subject]);
+    return result.rows[0];
+  }
+
+  // Get recently soft-deleted records (for undo UI)
+  static async getRecentDeletes(minutes = 30) {
+    const query = `
+      SELECT a.id, a.student_id, TO_CHAR(a.date, 'YYYY-MM-DD') as date, a.status, a.subject, a.deleted_at,
+             s.name as student_name, s.korean_name
+      FROM attendance a
+      LEFT JOIN students s ON s.id = a.student_id
+      WHERE a.is_deleted = true AND a.deleted_at >= NOW() - INTERVAL '1 minute' * $1
+      ORDER BY a.deleted_at DESC
+    `;
+    const result = await pool.query(query, [minutes]);
+    return result.rows;
   }
 
   // Get attendance summary for a student
@@ -561,7 +597,7 @@ class Attendance {
         COUNT(*) FILTER (WHERE status = 'absent') as absent_count,
         COUNT(*) as total_records
       FROM attendance
-      WHERE student_id = $1 AND date >= $2 AND date <= $3
+      WHERE student_id = $1 AND date >= $2 AND date <= $3 AND is_deleted = false
     `;
     const result = await pool.query(query, [studentId, startDate, endDate]);
     return result.rows[0];
@@ -581,7 +617,7 @@ class Attendance {
         COUNT(*) FILTER (WHERE a.status = 'absent') as absent_count
       FROM attendance a
       JOIN students s ON s.id = a.student_id
-      WHERE a.date >= $1 AND a.date <= $2
+      WHERE a.date >= $1 AND a.date <= $2 AND a.is_deleted = false
       GROUP BY a.student_id, s.name, s.english_name
       ORDER BY s.name
     `;
@@ -713,151 +749,8 @@ class Attendance {
   }
 
   // ==================== TUITION METHODS ====================
-
-  // Get all tuition fees (price per class)
-  static async getAllTuition() {
-    const query = `
-      SELECT student_id, price_per_class
-      FROM student_tuition
-    `;
-    const result = await pool.query(query);
-    return result.rows;
-  }
-
-  // Get tuition fee for a specific student
-  static async getTuition(studentId) {
-    const query = `
-      SELECT student_id, price_per_class
-      FROM student_tuition
-      WHERE student_id = $1
-    `;
-    const result = await pool.query(query, [studentId]);
-    return result.rows[0] || { student_id: studentId, price_per_class: 0 };
-  }
-
-  // Set price per class for a student (with currency)
-  static async setTuition(studentId, pricePerClass, currency = 'PHP') {
-    const query = `
-      INSERT INTO student_tuition (student_id, price_per_class, currency, updated_at)
-      VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
-      ON CONFLICT (student_id)
-      DO UPDATE SET
-        price_per_class = EXCLUDED.price_per_class,
-        currency = EXCLUDED.currency,
-        updated_at = CURRENT_TIMESTAMP
-      RETURNING *
-    `;
-    const result = await pool.query(query, [studentId, pricePerClass, currency]);
-    return result.rows[0];
-  }
-
-  // Get all payments for a specific month
-  static async getPaymentsByMonth(year, month) {
-    const query = `
-      SELECT student_id, year, month, paid,
-             TO_CHAR(payment_date, 'YYYY-MM-DD') as payment_date,
-             notes
-      FROM tuition_payments
-      WHERE year = $1 AND month = $2
-    `;
-    const result = await pool.query(query, [year, month]);
-    return result.rows;
-  }
-
-  // Get payment status for a specific student and month
-  static async getPayment(studentId, year, month) {
-    const query = `
-      SELECT student_id, year, month, paid,
-             TO_CHAR(payment_date, 'YYYY-MM-DD') as payment_date,
-             notes
-      FROM tuition_payments
-      WHERE student_id = $1 AND year = $2 AND month = $3
-    `;
-    const result = await pool.query(query, [studentId, year, month]);
-    return result.rows[0] || { student_id: studentId, year, month, paid: false };
-  }
-
-  // Set payment status for a student
-  static async setPayment(studentId, year, month, paid, paymentDate = null, notes = null) {
-    const query = `
-      INSERT INTO tuition_payments (student_id, year, month, paid, payment_date, notes, updated_at)
-      VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)
-      ON CONFLICT (student_id, year, month)
-      DO UPDATE SET
-        paid = EXCLUDED.paid,
-        payment_date = EXCLUDED.payment_date,
-        notes = EXCLUDED.notes,
-        updated_at = CURRENT_TIMESTAMP
-      RETURNING *, TO_CHAR(payment_date, 'YYYY-MM-DD') as payment_date
-    `;
-    const result = await pool.query(query, [studentId, year, month, paid, paymentDate, notes]);
-    return result.rows[0];
-  }
-
-  // Toggle payment status
-  static async togglePayment(studentId, year, month) {
-    const current = await this.getPayment(studentId, year, month);
-    const newPaid = !current.paid;
-    const paymentDate = newPaid ? new Date().toISOString().split('T')[0] : null;
-    return this.setPayment(studentId, year, month, newPaid, paymentDate, current.notes);
-  }
-
-  // Get students with tuition and payment info for a month
-  static async getStudentsWithTuition(year, month) {
-    try {
-      const startDate = `${year}-${String(month).padStart(2, '0')}-01`;
-      const lastDay = new Date(year, month, 0).getDate();
-      const endDate = `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
-
-      // Run students + tuition/attendance/payments in parallel
-      const [students, tuitionResult, attendanceResult, paymentsResult] = await Promise.all([
-        this.getStudentsWithClasses(),
-        pool.query('SELECT student_id, price_per_class, currency FROM student_tuition'),
-        pool.query(
-          `SELECT student_id, COUNT(*) as present_count
-           FROM attendance WHERE date >= $1 AND date <= $2 AND status = 'present'
-           GROUP BY student_id`,
-          [startDate, endDate]
-        ),
-        pool.query(
-          `SELECT student_id, paid, TO_CHAR(payment_date, 'YYYY-MM-DD') as payment_date, notes
-           FROM tuition_payments WHERE year = $1 AND month = $2`,
-          [year, month]
-        ),
-      ]);
-
-      const tuitionMap = {};
-      tuitionResult.rows.forEach(row => {
-        tuitionMap[row.student_id] = { price_per_class: parseFloat(row.price_per_class), currency: row.currency || 'PHP' };
-      });
-
-      const attendanceMap = {};
-      attendanceResult.rows.forEach(row => { attendanceMap[row.student_id] = parseInt(row.present_count); });
-
-      const paymentsMap = {};
-      paymentsResult.rows.forEach(row => {
-        paymentsMap[row.student_id] = { paid: row.paid, payment_date: row.payment_date, notes: row.notes };
-      });
-
-      return students.map(student => {
-        const tuitionInfo = tuitionMap[student.id] || { price_per_class: 0, currency: 'PHP' };
-        const presentCount = attendanceMap[student.id] || 0;
-        return {
-          ...student,
-          price_per_class: tuitionInfo.price_per_class,
-          currency: tuitionInfo.currency,
-          present_count: presentCount,
-          total_tuition: tuitionInfo.price_per_class * presentCount,
-          paid: paymentsMap[student.id]?.paid || false,
-          payment_date: paymentsMap[student.id]?.payment_date || null,
-          payment_notes: paymentsMap[student.id]?.notes || null
-        };
-      });
-    } catch (error) {
-      console.error('Error fetching students with tuition:', error.message);
-      throw error;
-    }
-  }
+  // Legacy single-subject tuition (student_tuition / tuition_payments) has been removed.
+  // Use subject-based tuition methods below (student_subject_tuition / subject_tuition_payments).
 
   // ==================== TEACHER COMMISSION METHODS ====================
 
@@ -979,7 +872,7 @@ class Attendance {
             COUNT(*) as class_count
           FROM attendance
           WHERE date >= $3 AND date <= $4
-            AND status = 'present'
+            AND status = 'present' AND is_deleted = false
           GROUP BY student_id
         )
         SELECT
@@ -1168,7 +1061,7 @@ class Attendance {
         pool.query('SELECT student_id, subject, price_per_class, currency FROM student_subject_tuition'),
         pool.query(
           `SELECT student_id, COUNT(*) as present_count
-           FROM attendance WHERE date >= $1 AND date <= $2 AND status = 'present'
+           FROM attendance WHERE date >= $1 AND date <= $2 AND status = 'present' AND is_deleted = false
            GROUP BY student_id`,
           [startDate, endDate]
         ),
@@ -1298,6 +1191,77 @@ class Attendance {
     `;
     const result = await pool.query(query, [studentId, subject]);
     return result.rows.length > 0;
+  }
+  // Bulk set attendance for multiple student-subject entries on a given date
+  // studentEntries: array of { studentId, subject }
+  // Returns the count of records affected
+  static async bulkSetAttendance(studentEntries, date, status) {
+    if (!studentEntries || studentEntries.length === 0) return 0;
+
+    // Build batch VALUES clause: ($1, $2, $3, $4, $5), ($6, $7, $8, $9, $10), ...
+    const values = [];
+    const params = [];
+    studentEntries.forEach((entry, i) => {
+      const offset = i * 4;
+      values.push(`($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, CURRENT_TIMESTAMP)`);
+      params.push(entry.studentId, date, status, entry.subject || null);
+    });
+
+    const query = `
+      INSERT INTO attendance (student_id, date, status, subject, updated_at)
+      VALUES ${values.join(', ')}
+      ON CONFLICT (student_id, date, subject)
+      DO UPDATE SET
+        status = EXCLUDED.status,
+        is_deleted = false,
+        deleted_at = NULL,
+        updated_at = CURRENT_TIMESTAMP
+    `;
+    const result = await pool.query(query, params);
+    return result.rowCount;
+  }
+
+  // Export data for monthly CSV
+  // Returns students, attendance records, and holidays for the given month
+  static async exportMonthlyCSV(year, month) {
+    const [students, attendance, holidays] = await Promise.all([
+      this.getStudentsWithClasses(year, month),
+      this.getByMonth(year, month),
+      this.getHolidaysByMonth(year, month)
+    ]);
+
+    return { students, attendance, holidays };
+  }
+
+  // Get a teacher's schedule for a given date (students, subjects, time slots, attendance)
+  static async getTeacherSchedule(teacherName, date) {
+    try {
+      // Derive the day name from the date for matching assignments.date (which stores day names like 'Monday')
+      const dayName = new Date(date + 'T00:00:00').toLocaleDateString('en-US', { weekday: 'long' });
+
+      const query = `
+        SELECT s.name, s.korean_name, a.subject,
+               TO_CHAR(ts.start_time, 'HH:MI AM') as start_time,
+               TO_CHAR(ts.end_time, 'HH:MI AM') as end_time,
+               att.status as attendance_status
+        FROM assignment_students ast
+        JOIN students s ON s.id = ast.student_id
+        JOIN assignments a ON a.id = ast.assignment_id
+        JOIN time_slots ts ON ts.id = a.time_slot_id
+        JOIN assignment_teachers ateach ON ateach.assignment_id = a.id
+        JOIN teachers t ON t.id = ateach.teacher_id
+        LEFT JOIN attendance att ON att.student_id = s.id
+          AND att.date = $2 AND att.subject = a.subject AND att.is_deleted = false
+        WHERE t.name = $1 AND a.date = $3 AND a.is_active = true
+        ORDER BY ts.start_time, s.name
+      `;
+
+      const result = await pool.query(query, [teacherName, date, dayName]);
+      return result.rows;
+    } catch (error) {
+      console.error('Error fetching teacher schedule:', error.message);
+      throw error;
+    }
   }
 }
 

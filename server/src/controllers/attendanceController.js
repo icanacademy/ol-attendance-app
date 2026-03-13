@@ -61,6 +61,31 @@ exports.setAttendance = async (req, res) => {
   }
 };
 
+// Bulk set attendance for multiple students on a specific date
+exports.bulkSetAttendance = async (req, res) => {
+  try {
+    const { entries, date, status } = req.body;
+
+    if (!entries || !Array.isArray(entries) || entries.length === 0 || !date || !status) {
+      return res.status(400).json({
+        error: 'entries (non-empty array), date, and status are required'
+      });
+    }
+
+    if (!['present', 'absent', 'ta', 'noshow'].includes(status)) {
+      return res.status(400).json({
+        error: 'Status must be "present", "absent", "ta", or "noshow"'
+      });
+    }
+
+    const count = await Attendance.bulkSetAttendance(entries, date, status);
+    res.json({ count });
+  } catch (error) {
+    console.error('Error bulk setting attendance:', error);
+    res.status(500).json({ error: 'Failed to bulk set attendance' });
+  }
+};
+
 // Toggle attendance status (with optional subject)
 exports.toggleAttendance = async (req, res) => {
   try {
@@ -77,6 +102,42 @@ exports.toggleAttendance = async (req, res) => {
   } catch (error) {
     console.error('Error toggling attendance:', error);
     res.status(500).json({ error: 'Failed to toggle attendance' });
+  }
+};
+
+// Undo a soft-deleted attendance record
+exports.undoDelete = async (req, res) => {
+  try {
+    const { studentId, date, subject } = req.body;
+
+    if (!studentId || !date) {
+      return res.status(400).json({
+        error: 'studentId and date are required'
+      });
+    }
+
+    const record = await Attendance.undoDelete(parseInt(studentId), date, subject || null);
+
+    if (!record) {
+      return res.status(404).json({ error: 'No deleted record found to undo' });
+    }
+
+    res.json(record);
+  } catch (error) {
+    console.error('Error undoing delete:', error);
+    res.status(500).json({ error: 'Failed to undo delete' });
+  }
+};
+
+// Get recently soft-deleted attendance records
+exports.getRecentDeletes = async (req, res) => {
+  try {
+    const { minutes } = req.query;
+    const records = await Attendance.getRecentDeletes(minutes ? parseInt(minutes) : 30);
+    res.json(records);
+  } catch (error) {
+    console.error('Error fetching recent deletes:', error);
+    res.status(500).json({ error: 'Failed to fetch recent deletes' });
   }
 };
 
@@ -232,18 +293,20 @@ exports.setNote = async (req, res) => {
 
 // Admin password for protected routes - loaded from environment variable
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+const { generateToken } = require('../middleware/auth');
 
 if (!ADMIN_PASSWORD) {
   console.warn('WARNING: ADMIN_PASSWORD environment variable is not set. Admin routes will be inaccessible.');
 }
 
-// Verify admin password
+// Verify admin password and return JWT token
 exports.verifyAdmin = async (req, res) => {
   try {
     const { password } = req.body;
 
     if (password === ADMIN_PASSWORD) {
-      res.json({ success: true });
+      const token = generateToken();
+      res.json({ success: true, token });
     } else {
       res.status(401).json({ error: 'Invalid password' });
     }
@@ -325,106 +388,6 @@ exports.deleteHoliday = async (req, res) => {
   } catch (error) {
     console.error('Error deleting holiday:', error);
     res.status(500).json({ error: 'Failed to delete holiday' });
-  }
-};
-
-// ==================== TUITION ENDPOINTS ====================
-
-// Get students with tuition and payment info for a month
-exports.getStudentsWithTuition = async (req, res) => {
-  try {
-    const { year, month } = req.query;
-
-    if (!year || !month) {
-      return res.status(400).json({ error: 'Year and month are required' });
-    }
-
-    const students = await Attendance.getStudentsWithTuition(
-      parseInt(year),
-      parseInt(month)
-    );
-    res.json(students);
-  } catch (error) {
-    console.error('Error fetching students with tuition:', error);
-    res.status(500).json({ error: 'Failed to fetch students with tuition' });
-  }
-};
-
-// Set price per class for a student (admin only)
-exports.setTuition = async (req, res) => {
-  try {
-    const { studentId, pricePerClass, currency, password } = req.body;
-
-    if (password !== ADMIN_PASSWORD) {
-      return res.status(401).json({ error: 'Invalid admin password' });
-    }
-
-    if (!studentId || pricePerClass === undefined) {
-      return res.status(400).json({ error: 'studentId and pricePerClass are required' });
-    }
-
-    // Validate currency
-    const validCurrencies = ['PHP', 'KRW'];
-    const currencyValue = currency && validCurrencies.includes(currency) ? currency : 'PHP';
-
-    const result = await Attendance.setTuition(parseInt(studentId), parseFloat(pricePerClass), currencyValue);
-    res.json(result);
-  } catch (error) {
-    console.error('Error setting tuition:', error);
-    res.status(500).json({ error: 'Failed to set tuition' });
-  }
-};
-
-// Toggle payment status (admin only)
-exports.togglePayment = async (req, res) => {
-  try {
-    const { studentId, year, month, password } = req.body;
-
-    if (password !== ADMIN_PASSWORD) {
-      return res.status(401).json({ error: 'Invalid admin password' });
-    }
-
-    if (!studentId || !year || !month) {
-      return res.status(400).json({ error: 'studentId, year, and month are required' });
-    }
-
-    const result = await Attendance.togglePayment(
-      parseInt(studentId),
-      parseInt(year),
-      parseInt(month)
-    );
-    res.json(result);
-  } catch (error) {
-    console.error('Error toggling payment:', error);
-    res.status(500).json({ error: 'Failed to toggle payment' });
-  }
-};
-
-// Set payment details (admin only)
-exports.setPayment = async (req, res) => {
-  try {
-    const { studentId, year, month, paid, paymentDate, notes, password } = req.body;
-
-    if (password !== ADMIN_PASSWORD) {
-      return res.status(401).json({ error: 'Invalid admin password' });
-    }
-
-    if (!studentId || !year || !month) {
-      return res.status(400).json({ error: 'studentId, year, and month are required' });
-    }
-
-    const result = await Attendance.setPayment(
-      parseInt(studentId),
-      parseInt(year),
-      parseInt(month),
-      paid,
-      paymentDate || null,
-      notes || null
-    );
-    res.json(result);
-  } catch (error) {
-    console.error('Error setting payment:', error);
-    res.status(500).json({ error: 'Failed to set payment' });
   }
 };
 
@@ -646,6 +609,100 @@ exports.deleteStudentSubject = async (req, res) => {
   } catch (error) {
     console.error('Error deleting student subject:', error);
     res.status(500).json({ error: 'Failed to delete student subject' });
+  }
+};
+
+// Export attendance as CSV
+exports.exportCSV = async (req, res) => {
+  try {
+    const { year, month } = req.query;
+
+    if (!year || !month) {
+      return res.status(400).json({ error: 'Year and month are required' });
+    }
+
+    const y = parseInt(year);
+    const m = parseInt(month);
+    const { students, attendance, holidays } = await Attendance.exportMonthlyCSV(y, m);
+
+    // Build attendance lookup map
+    const attendanceMap = {};
+    attendance.forEach(record => {
+      const dateStr = record.date.split('T')[0];
+      const key = `${record.student_id}-${record.subject || 'default'}-${dateStr}`;
+      attendanceMap[key] = record.status;
+    });
+
+    // Build holidays lookup set
+    const holidaySet = new Set(holidays.map(h => h.date));
+
+    // Build CSV
+    const daysInMonth = new Date(y, m, 0).getDate();
+    const dayHeaders = Array.from({ length: daysInMonth }, (_, i) => i + 1);
+
+    // Escape CSV field (wrap in quotes if it contains comma, quote, or newline)
+    const escapeCSV = (val) => {
+      if (val == null) return '';
+      const str = String(val);
+      if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+        return '"' + str.replace(/"/g, '""') + '"';
+      }
+      return str;
+    };
+
+    // Header row
+    const headerRow = ['Student Name', 'Korean Name', 'Subject', 'Teacher']
+      .concat(dayHeaders)
+      .map(escapeCSV)
+      .join(',');
+
+    // Data rows
+    const dataRows = students.map(student => {
+      const statusMap = { present: 'P', absent: 'A', ta: 'TA', noshow: 'N' };
+      const dayCells = dayHeaders.map(day => {
+        const dateStr = `${y}-${String(m).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+        if (holidaySet.has(dateStr)) return 'H';
+        const key = `${student.id}-${student.subject || 'default'}-${dateStr}`;
+        const status = attendanceMap[key];
+        return status ? (statusMap[status] || '') : '';
+      });
+
+      return [
+        student.name,
+        student.korean_name || '',
+        student.subject || '',
+        student.teacher_name || ''
+      ].concat(dayCells).map(escapeCSV).join(',');
+    });
+
+    const csv = [headerRow, ...dataRows].join('\n');
+
+    const filename = `attendance_${y}_${String(m).padStart(2, '0')}.csv`;
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(csv);
+  } catch (error) {
+    console.error('Error exporting CSV:', error);
+    res.status(500).json({ error: 'Failed to export CSV' });
+  }
+};
+
+// ==================== TEACHER DASHBOARD ENDPOINTS ====================
+
+// Get teacher schedule for a date
+exports.getTeacherSchedule = async (req, res) => {
+  try {
+    const { teacher, date } = req.query;
+
+    if (!teacher || !date) {
+      return res.status(400).json({ error: 'teacher and date are required' });
+    }
+
+    const schedule = await Attendance.getTeacherSchedule(teacher, date);
+    res.json(schedule);
+  } catch (error) {
+    console.error('Error fetching teacher schedule:', error);
+    res.status(500).json({ error: 'Failed to fetch teacher schedule' });
   }
 };
 

@@ -1,9 +1,13 @@
 const express = require('express');
 const router = express.Router();
 const attendanceController = require('../controllers/attendanceController');
+const { requireAdmin } = require('../middleware/auth');
 
 // Get all students with classes
 router.get('/students', attendanceController.getStudents);
+
+// Export attendance as CSV
+router.get('/export', attendanceController.exportCSV);
 
 // Get attendance for a month
 router.get('/monthly', attendanceController.getMonthlyAttendance);
@@ -20,13 +24,22 @@ router.get('/teachers', attendanceController.getTeacherAssignments);
 // Get student summary for a month
 router.get('/summary/:studentId', attendanceController.getStudentSummary);
 
+// Bulk set attendance
+router.post('/bulk', attendanceController.bulkSetAttendance);
+
 // Set attendance
 router.post('/', attendanceController.setAttendance);
 
 // Toggle attendance
 router.post('/toggle', attendanceController.toggleAttendance);
 
-// Delete attendance record
+// Undo soft-deleted attendance record
+router.post('/undo', attendanceController.undoDelete);
+
+// Get recently soft-deleted attendance records
+router.get('/recent-deletes', attendanceController.getRecentDeletes);
+
+// Delete attendance record (soft delete)
 router.delete('/', attendanceController.deleteAttendance);
 
 // Get notes for a month
@@ -45,34 +58,31 @@ router.get('/holidays', attendanceController.getHolidays);
 router.get('/holidays/monthly', attendanceController.getHolidaysByMonth);
 
 // Add a holiday (admin only)
-router.post('/holidays', attendanceController.addHoliday);
+router.post('/holidays', requireAdmin, attendanceController.addHoliday);
 
 // Delete a holiday (admin only)
-router.delete('/holidays/:id', attendanceController.deleteHoliday);
+router.delete('/holidays/:id', requireAdmin, attendanceController.deleteHoliday);
 
-// Tuition routes (legacy - single subject per student)
-router.get('/tuition', attendanceController.getStudentsWithTuition);
-router.post('/tuition', attendanceController.setTuition);
-router.post('/tuition/payment', attendanceController.setPayment);
-router.post('/tuition/payment/toggle', attendanceController.togglePayment);
-
-// Subject-based tuition routes (multiple subjects per student)
+// Subject-based tuition routes
 router.get('/subjects', attendanceController.getSubjects);
 router.get('/tuition/subjects', attendanceController.getStudentsWithSubjectTuition);
-router.post('/tuition/subjects', attendanceController.setSubjectTuition);
-router.post('/tuition/subjects/payment/toggle', attendanceController.toggleSubjectPayment);
-router.post('/tuition/subjects/add', attendanceController.addStudentSubject);
-router.delete('/tuition/subjects', attendanceController.deleteStudentSubject);
+router.post('/tuition/subjects', requireAdmin, attendanceController.setSubjectTuition);
+router.post('/tuition/subjects/payment/toggle', requireAdmin, attendanceController.toggleSubjectPayment);
+router.post('/tuition/subjects/add', requireAdmin, attendanceController.addStudentSubject);
+router.delete('/tuition/subjects', requireAdmin, attendanceController.deleteStudentSubject);
 
 // Teacher commission routes
 router.get('/commission/teachers', attendanceController.getTeachers);
 router.get('/commission', attendanceController.getTeachersWithCommission);
-router.post('/commission', attendanceController.setTeacherCommission);
-router.post('/commission/payment/toggle', attendanceController.toggleTeacherPayment);
+router.post('/commission', requireAdmin, attendanceController.setTeacherCommission);
+router.post('/commission/payment/toggle', requireAdmin, attendanceController.toggleTeacherPayment);
+
+// Teacher dashboard routes
+router.get('/teacher-schedule', attendanceController.getTeacherSchedule);
 
 // Hidden rows routes
 router.get('/hidden', attendanceController.getHiddenRows);
-router.post('/hidden', attendanceController.hideRow);
-router.delete('/hidden', attendanceController.unhideRow);
+router.post('/hidden', requireAdmin, attendanceController.hideRow);
+router.delete('/hidden', requireAdmin, attendanceController.unhideRow);
 
 module.exports = router;

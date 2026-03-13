@@ -1,6 +1,6 @@
-import React, { useMemo, useState, useRef, useEffect } from 'react';
+import React, { useMemo, useState, useRef, useEffect, useCallback } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { setAttendance, deleteAttendance, setNote, hideRow } from '../services/api';
+import { setAttendance, deleteAttendance, undoDeleteAttendance, setNote, hideRow, exportAttendanceCSV, bulkSetAttendance } from '../services/api';
 
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
@@ -21,6 +21,8 @@ function AttendanceGrid({
   const [dropdown, setDropdown] = useState(null); // { studentId, dateStr, subject, x, y }
   const [editingNote, setEditingNote] = useState({}); // { rowKey: noteText }
   const dropdownRef = useRef(null);
+  const [undoToast, setUndoToast] = useState(null); // { studentId, date, subject, status, studentName }
+  const undoTimerRef = useRef(null);
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -32,6 +34,16 @@ function AttendanceGrid({
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
+
+  // Auto-dismiss undo toast after 10 seconds
+  useEffect(() => {
+    if (undoToast) {
+      undoTimerRef.current = setTimeout(() => {
+        setUndoToast(null);
+      }, 10000);
+      return () => clearTimeout(undoTimerRef.current);
+    }
+  }, [undoToast]);
 
   // Get today's date string for highlighting
   const today = new Date();
@@ -76,16 +88,17 @@ function AttendanceGrid({
     return map;
   }, [notes]);
 
-  // Create holidays lookup set
-  const holidaysSet = useMemo(() => {
-    const set = new Set();
+  // Create holidays lookup map (date → name)
+  const holidaysMap = useMemo(() => {
+    const map = new Map();
     holidays.forEach(holiday => {
-      set.add(holiday.date);
+      map.set(holiday.date, holiday.name || 'Holiday');
     });
-    return set;
+    return map;
   }, [holidays]);
 
-  const isHoliday = (dateStr) => holidaysSet.has(dateStr);
+  const isHoliday = (dateStr) => holidaysMap.has(dateStr);
+  const getHolidayName = (dateStr) => holidaysMap.get(dateStr);
 
   // Check if date is in selected range
   const isInSelectedRange = (dateStr) => {
@@ -220,13 +233,18 @@ function AttendanceGrid({
     }
   });
 
-  // Delete attendance mutation with optimistic update (now includes subject)
+  // Delete attendance mutation with optimistic update (now soft deletes)
   const deleteMutation = useMutation({
     mutationFn: ({ studentId, date, subject }) => deleteAttendance(studentId, date, subject),
     onMutate: async ({ studentId, date, subject }) => {
       await queryClient.cancelQueries(['attendance', year, month]);
 
       const previousAttendance = queryClient.getQueryData(['attendance', year, month]);
+
+      // Capture the status of the record being deleted (for undo toast)
+      const deletedRecord = (previousAttendance || []).find(
+        r => r.student_id === studentId && r.date.split('T')[0] === date && (r.subject || null) === (subject || null)
+      );
 
       // Optimistically remove from cache
       queryClient.setQueryData(['attendance', year, month], (old = []) => {
@@ -235,7 +253,21 @@ function AttendanceGrid({
         );
       });
 
-      return { previousAttendance };
+      return { previousAttendance, deletedRecord };
+    },
+    onSuccess: (data, variables, context) => {
+      // Show undo toast with deleted record info
+      const deletedStatus = context?.deletedRecord?.status;
+      const studentName = students.find(s => s.id === variables.studentId)?.name || 'Student';
+      if (deletedStatus) {
+        setUndoToast({
+          studentId: variables.studentId,
+          date: variables.date,
+          subject: variables.subject,
+          status: deletedStatus,
+          studentName
+        });
+      }
     },
     onError: (err, variables, context) => {
       if (context?.previousAttendance) {
@@ -243,6 +275,32 @@ function AttendanceGrid({
       }
     }
   });
+
+  // Undo delete mutation - restores a soft-deleted record
+  const undoMutation = useMutation({
+    mutationFn: ({ studentId, date, subject }) => undoDeleteAttendance(studentId, date, subject),
+    onSuccess: (data) => {
+      // Add the restored record back into the cache
+      queryClient.setQueryData(['attendance', year, month], (old = []) => {
+        return [...old, { student_id: data.student_id, date: data.date, status: data.status, subject: data.subject }];
+      });
+      setUndoToast(null);
+      clearTimeout(undoTimerRef.current);
+    },
+    onError: () => {
+      // If undo fails, just dismiss the toast
+      setUndoToast(null);
+    }
+  });
+
+  const handleUndo = useCallback(() => {
+    if (!undoToast) return;
+    undoMutation.mutate({
+      studentId: undoToast.studentId,
+      date: undoToast.date,
+      subject: undoToast.subject
+    });
+  }, [undoToast, undoMutation]);
 
   // Set note mutation (now includes subject)
   const noteMutation = useMutation({
@@ -260,6 +318,47 @@ function AttendanceGrid({
       queryClient.invalidateQueries(['students', year, month]);
     }
   });
+
+  // Bulk set attendance mutation - marks all visible scheduled students present for a day
+  const bulkMutation = useMutation({
+    mutationFn: ({ entries, date, status }) => bulkSetAttendance({ entries, date, status }),
+    onSuccess: () => {
+      queryClient.invalidateQueries(['attendance', year, month]);
+    }
+  });
+
+  // Handle bulk mark all present for a specific day
+  const handleBulkPresent = (dateStr) => {
+    const date = new Date(dateStr + 'T00:00:00');
+    const dayOfWeek = date.getDay();
+
+    // Collect entries for students whose schedule includes this day of the week
+    const entries = [];
+    students.forEach(student => {
+      let scheduledDayNumbers = [];
+      if (student.schedules && student.schedules.length > 0) {
+        student.schedules.forEach(sched => {
+          if (sched.days) {
+            parseScheduleDays(sched.days).forEach(d => {
+              if (!scheduledDayNumbers.includes(d)) {
+                scheduledDayNumbers.push(d);
+              }
+            });
+          }
+        });
+      } else if (student.schedule_days) {
+        scheduledDayNumbers = parseScheduleDays(student.schedule_days);
+      }
+
+      if (scheduledDayNumbers.includes(dayOfWeek)) {
+        entries.push({ studentId: student.id, subject: student.subject || null });
+      }
+    });
+
+    if (entries.length === 0) return;
+
+    bulkMutation.mutate({ entries, date: dateStr, status: 'present' });
+  };
 
   // Get month name for display
   const monthNames = ['', 'January', 'February', 'March', 'April', 'May', 'June',
@@ -369,50 +468,78 @@ function AttendanceGrid({
     );
   }
 
+  const handleExportCSV = async () => {
+    try {
+      const response = await exportAttendanceCSV(year, month);
+      const blob = new Blob([response.data], { type: 'text/csv' });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `attendance_${year}_${String(month).padStart(2, '0')}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('Error exporting CSV:', error);
+    }
+  };
+
   return (
     <div className="overflow-x-scroll bg-white rounded-lg shadow">
+      <div className="px-4 py-2 border-b flex justify-end">
+        <button
+          onClick={handleExportCSV}
+          className="px-3 py-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 transition-colors flex items-center gap-1.5"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+          </svg>
+          Export CSV
+        </button>
+      </div>
       <table className="border-collapse" style={{ minWidth: 'max-content' }}>
         <thead className="sticky top-0 z-10">
           <tr className="bg-gray-100">
             {/* Student name header */}
-            <th className="sticky left-0 z-20 bg-gray-100 px-4 py-3 text-left text-sm font-semibold text-gray-700 border-b min-w-[150px]">
+            <th className="sticky left-0 z-20 bg-gray-100 px-2 md:px-4 py-2 md:py-3 text-left text-xs md:text-sm font-semibold text-gray-700 border-b min-w-[100px] md:min-w-[150px]">
               Student
             </th>
             {/* Teacher header */}
-            <th className="bg-gray-100 px-3 py-3 text-left text-sm font-semibold text-gray-700 border-b min-w-[100px]">
+            <th className="hidden md:table-cell bg-gray-100 px-3 py-3 text-left text-sm font-semibold text-gray-700 border-b min-w-[100px]">
               Teacher
             </th>
             {/* Subject header */}
-            <th className="bg-indigo-50 px-3 py-3 text-left text-sm font-semibold text-indigo-700 border-b min-w-[80px]">
+            <th className="bg-indigo-50 px-1 md:px-3 py-2 md:py-3 text-left text-xs md:text-sm font-semibold text-indigo-700 border-b min-w-[50px] md:min-w-[80px]">
               Subject
             </th>
             {/* Schedule header */}
-            <th className="bg-purple-50 px-3 py-3 text-left text-sm font-semibold text-purple-700 border-b min-w-[140px]">
+            <th className="hidden md:table-cell bg-purple-50 px-3 py-3 text-left text-sm font-semibold text-purple-700 border-b min-w-[140px]">
               Schedule
             </th>
             {/* Attendance % header */}
-            <th className="bg-emerald-50 px-2 py-3 text-center text-sm font-semibold text-emerald-700 border-b min-w-[50px]">
+            <th className="bg-emerald-50 px-1 md:px-2 py-2 md:py-3 text-center text-xs md:text-sm font-semibold text-emerald-700 border-b min-w-[36px] md:min-w-[50px]">
               %
             </th>
             {/* Notes header */}
-            <th className="bg-yellow-50 px-3 py-3 text-left text-sm font-semibold text-yellow-700 border-b border-r min-w-[150px]">
+            <th className="hidden md:table-cell bg-yellow-50 px-3 py-3 text-left text-sm font-semibold text-yellow-700 border-b border-r min-w-[150px]">
               Notes
             </th>
             {/* Summary columns */}
-            <th className="bg-green-50 px-2 py-3 text-center text-xs font-semibold text-green-700 border-b min-w-[40px]">
+            <th className="hidden md:table-cell bg-green-50 px-2 py-3 text-center text-xs font-semibold text-green-700 border-b min-w-[40px]">
               P
             </th>
-            <th className="bg-red-50 px-2 py-3 text-center text-xs font-semibold text-red-700 border-b min-w-[40px]">
+            <th className="hidden md:table-cell bg-red-50 px-2 py-3 text-center text-xs font-semibold text-red-700 border-b min-w-[40px]">
               A
             </th>
-            <th className="bg-blue-50 px-2 py-3 text-center text-xs font-semibold text-blue-700 border-b min-w-[40px]">
+            <th className="hidden md:table-cell bg-blue-50 px-2 py-3 text-center text-xs font-semibold text-blue-700 border-b min-w-[40px]">
               TA
             </th>
-            <th className="bg-orange-50 px-2 py-3 text-center text-xs font-semibold text-orange-700 border-b border-r min-w-[40px]">
+            <th className="hidden md:table-cell bg-orange-50 px-2 py-3 text-center text-xs font-semibold text-orange-700 border-b border-r min-w-[40px]">
               N
             </th>
             {/* Hide button header */}
-            <th className="bg-red-50 px-2 py-3 text-center text-xs font-semibold text-red-600 border-b border-r min-w-[50px]">
+            <th className="hidden md:table-cell bg-red-50 px-2 py-3 text-center text-xs font-semibold text-red-600 border-b border-r min-w-[50px]">
               Hide
             </th>
             {/* Day headers */}
@@ -425,7 +552,7 @@ function AttendanceGrid({
                 <th
                   key={day.day}
                   onClick={isSelectingRange ? () => onDateRangeSelect(day.dateStr) : undefined}
-                  className={`px-1 py-2 text-center text-xs border-b min-w-[36px] ${
+                  className={`px-0.5 md:px-1 py-1 md:py-2 text-center text-[10px] md:text-xs border-b min-w-[28px] md:min-w-[36px] ${
                     isSelectingRange ? 'cursor-pointer hover:bg-purple-200' : ''
                   } ${
                     inRange
@@ -442,7 +569,16 @@ function AttendanceGrid({
                   }`}
                 >
                   <div className="font-semibold">{day.day}</div>
-                  <div className={`text-[10px] ${inRange ? '' : day.isToday ? 'text-amber-800' : ''}`}>{holiday ? 'H' : day.dayName}</div>
+                  <div className={`text-[10px] ${inRange ? '' : day.isToday ? 'text-amber-800' : ''}`} title={holiday ? getHolidayName(day.dateStr) : ''}>{holiday ? 'H' : day.dayName}</div>
+                  {!holiday && !isSelectingRange && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleBulkPresent(day.dateStr); }}
+                      className="mt-0.5 w-5 h-5 rounded bg-green-500 hover:bg-green-600 text-white text-[10px] leading-none flex items-center justify-center mx-auto transition-colors"
+                      title={`Mark all scheduled students present on ${day.dateStr}`}
+                    >
+                      ✓
+                    </button>
+                  )}
                 </th>
               );
             })}
@@ -458,7 +594,7 @@ function AttendanceGrid({
                 className={index % 2 === 0 ? 'bg-white' : 'bg-gray-50'}
               >
                 {/* Student name */}
-                <td className="sticky left-0 z-10 px-4 py-2 text-sm border-b bg-inherit">
+                <td className="sticky left-0 z-10 px-2 md:px-4 py-1 md:py-2 text-xs md:text-sm border-b bg-inherit">
                   <div className="font-medium text-gray-900">{student.name}</div>
                   {student.korean_name && (
                     <div className="text-xs text-blue-600 font-medium">{student.korean_name}</div>
@@ -468,15 +604,15 @@ function AttendanceGrid({
                   )}
                 </td>
                 {/* Teacher */}
-                <td className="px-3 py-2 text-sm border-b text-gray-700">
+                <td className="hidden md:table-cell px-3 py-2 text-sm border-b text-gray-700">
                   {student.teacher_name || '-'}
                 </td>
                 {/* Subject */}
-                <td className="px-3 py-2 text-sm border-b bg-indigo-50 text-indigo-700">
+                <td className="px-1 md:px-3 py-1 md:py-2 text-xs md:text-sm border-b bg-indigo-50 text-indigo-700">
                   {student.subject || '-'}
                 </td>
                 {/* Schedule */}
-                <td className="px-3 py-2 text-sm border-b bg-purple-50">
+                <td className="hidden md:table-cell px-3 py-2 text-sm border-b bg-purple-50">
                   {student.schedules && student.schedules.length > 0 ? (
                     <div className="space-y-1">
                       {student.schedules.map((sched, idx) => (
@@ -494,7 +630,7 @@ function AttendanceGrid({
                   ) : '-'}
                 </td>
                 {/* Attendance % */}
-                <td className="px-2 py-2 text-center text-sm font-medium border-b bg-emerald-50">
+                <td className="px-1 md:px-2 py-1 md:py-2 text-center text-xs md:text-sm font-medium border-b bg-emerald-50">
                   {(() => {
                     const pct = getAttendancePercentage(student.id, student.subject, student.schedules || student.schedule_days);
                     if (pct === null) return <span className="text-gray-400">-</span>;
@@ -510,7 +646,7 @@ function AttendanceGrid({
                   })()}
                 </td>
                 {/* Notes cell */}
-                <td className="px-2 py-1 border-b border-r bg-yellow-50">
+                <td className="hidden md:table-cell px-2 py-1 border-b border-r bg-yellow-50">
                   <input
                     type="text"
                     value={getNoteValue(student.id, student.subject, rowKey)}
@@ -521,20 +657,20 @@ function AttendanceGrid({
                   />
                 </td>
                 {/* Summary cells */}
-                <td className="px-2 py-2 text-center text-sm font-medium text-green-600 border-b bg-green-50">
+                <td className="hidden md:table-cell px-2 py-2 text-center text-sm font-medium text-green-600 border-b bg-green-50">
                   {summary.present}
                 </td>
-                <td className="px-2 py-2 text-center text-sm font-medium text-red-600 border-b bg-red-50">
+                <td className="hidden md:table-cell px-2 py-2 text-center text-sm font-medium text-red-600 border-b bg-red-50">
                   {summary.absent}
                 </td>
-                <td className="px-2 py-2 text-center text-sm font-medium text-blue-600 border-b bg-blue-50">
+                <td className="hidden md:table-cell px-2 py-2 text-center text-sm font-medium text-blue-600 border-b bg-blue-50">
                   {summary.ta}
                 </td>
-                <td className="px-2 py-2 text-center text-sm font-medium text-orange-600 border-b border-r bg-orange-50">
+                <td className="hidden md:table-cell px-2 py-2 text-center text-sm font-medium text-orange-600 border-b border-r bg-orange-50">
                   {summary.noshow}
                 </td>
                 {/* Hide button cell */}
-                <td className="px-2 py-2 text-center border-b border-r bg-red-50">
+                <td className="hidden md:table-cell px-2 py-2 text-center border-b border-r bg-red-50">
                   <button
                     onClick={() => handleHideRow(student)}
                     className="px-2 py-1 rounded bg-red-100 text-red-600 hover:bg-red-500 hover:text-white transition-colors text-xs font-medium border border-red-200 hover:border-red-500"
@@ -551,7 +687,7 @@ function AttendanceGrid({
                   return (
                     <td
                       key={day.day}
-                      className={`px-1 py-2 text-center border-b transition-colors ${
+                      className={`px-0.5 md:px-1 py-1 md:py-2 text-center border-b transition-colors ${
                         isSelectingRange ? 'cursor-pointer' : ''
                       } ${
                         inRange
@@ -567,13 +703,13 @@ function AttendanceGrid({
                       onClick={(isSelectingRange || !holiday) ? (e) => handleCellClick(e, student.id, day.dateStr, student.subject) : undefined}
                     >
                       {holiday ? (
-                        <div className="w-7 h-7 mx-auto rounded bg-orange-100 border-2 border-orange-300 flex items-center justify-center text-xs font-medium text-orange-500">
+                        <div className="w-6 h-6 md:w-7 md:h-7 mx-auto rounded bg-orange-100 border-2 border-orange-300 flex items-center justify-center text-[10px] md:text-xs font-medium text-orange-500" title={getHolidayName(day.dateStr)}>
                           H
                         </div>
                       ) : (
                         <div
                           className={`
-                            w-7 h-7 mx-auto rounded-full flex items-center justify-center text-xs font-medium
+                            w-6 h-6 md:w-7 md:h-7 mx-auto rounded-full flex items-center justify-center text-[10px] md:text-xs font-medium
                             transition-all hover:scale-110
                             ${status === 'present'
                               ? 'bg-green-500 text-white'
@@ -641,6 +777,28 @@ function AttendanceGrid({
           >
             <span className="w-6 h-6 rounded-full bg-gray-200 flex items-center justify-center text-gray-400 text-xs">-</span>
             <span>Clear</span>
+          </button>
+        </div>
+      )}
+
+      {/* Undo Toast */}
+      {undoToast && (
+        <div className="fixed bottom-6 left-1/2 transform -translate-x-1/2 z-50 bg-gray-800 text-white px-5 py-3 rounded-lg shadow-lg flex items-center gap-4 animate-fade-in">
+          <span className="text-sm">
+            Cleared <strong>{undoToast.status.toUpperCase()}</strong> for {undoToast.studentName}{undoToast.subject ? ` (${undoToast.subject})` : ''} on {undoToast.date}
+          </span>
+          <button
+            onClick={handleUndo}
+            disabled={undoMutation.isLoading}
+            className="px-3 py-1 bg-blue-500 hover:bg-blue-600 text-white text-sm font-medium rounded transition-colors disabled:opacity-50"
+          >
+            {undoMutation.isLoading ? 'Undoing...' : 'Undo'}
+          </button>
+          <button
+            onClick={() => { setUndoToast(null); clearTimeout(undoTimerRef.current); }}
+            className="text-gray-400 hover:text-white text-lg leading-none"
+          >
+            &times;
           </button>
         </div>
       )}

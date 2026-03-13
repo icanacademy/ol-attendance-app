@@ -41,6 +41,12 @@ export const setAttendance = async (studentId, date, status, notes = null, subje
   return response.data;
 };
 
+// Bulk set attendance for multiple students on a specific date
+export const bulkSetAttendance = async (data) => {
+  const response = await api.post('/attendance/bulk', data);
+  return response.data;
+};
+
 // Toggle attendance status (with optional subject)
 export const toggleAttendance = async (studentId, date, subject = null) => {
   const response = await api.post('/attendance/toggle', {
@@ -51,10 +57,28 @@ export const toggleAttendance = async (studentId, date, subject = null) => {
   return response.data;
 };
 
-// Delete attendance record (with optional subject)
+// Delete attendance record (with optional subject) - now soft deletes
 export const deleteAttendance = async (studentId, date, subject = null) => {
   const response = await api.delete('/attendance', {
     params: { studentId, date, subject }
+  });
+  return response.data;
+};
+
+// Undo a soft-deleted attendance record
+export const undoDeleteAttendance = async (studentId, date, subject = null) => {
+  const response = await api.post('/attendance/undo', {
+    studentId,
+    date,
+    subject
+  });
+  return response.data;
+};
+
+// Get recently soft-deleted attendance records
+export const getRecentDeletes = async (minutes = 30) => {
+  const response = await api.get('/attendance/recent-deletes', {
+    params: { minutes }
   });
   return response.data;
 };
@@ -103,10 +127,31 @@ export const setNote = async (studentId, year, month, notes, subject = null) => 
   return response.data;
 };
 
-// Verify admin password
+// Verify admin password and get JWT token
 export const verifyAdmin = async (password) => {
   const response = await api.post('/attendance/admin/verify', { password });
+  if (response.data.token) {
+    // Store token and set as default auth header
+    localStorage.setItem('admin_token', response.data.token);
+    api.defaults.headers.common['Authorization'] = `Bearer ${response.data.token}`;
+  }
   return response.data;
+};
+
+// Restore token from localStorage on app load
+export const restoreAdminToken = () => {
+  const token = localStorage.getItem('admin_token');
+  if (token) {
+    api.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+    return true;
+  }
+  return false;
+};
+
+// Clear admin token on logout
+export const clearAdminToken = () => {
+  localStorage.removeItem('admin_token');
+  delete api.defaults.headers.common['Authorization'];
 };
 
 // Get all holidays
@@ -141,51 +186,9 @@ export const deleteHoliday = async (id, password) => {
   return response.data;
 };
 
-// ==================== TUITION API ====================
-
-// Get students with tuition and payment info for a month
-export const getStudentsWithTuition = async (year, month) => {
-  const response = await api.get('/attendance/tuition', {
-    params: { year, month }
-  });
-  return response.data;
-};
-
-// Set price per class for a student (admin only)
-export const setTuition = async (studentId, pricePerClass, currency, password) => {
-  const response = await api.post('/attendance/tuition', {
-    studentId,
-    pricePerClass,
-    currency,
-    password
-  });
-  return response.data;
-};
-
-// Toggle payment status (admin only)
-export const togglePayment = async (studentId, year, month, password) => {
-  const response = await api.post('/attendance/tuition/payment/toggle', {
-    studentId,
-    year,
-    month,
-    password
-  });
-  return response.data;
-};
-
-// Set payment details (admin only)
-export const setPaymentDetails = async (studentId, year, month, paid, paymentDate, notes, password) => {
-  const response = await api.post('/attendance/tuition/payment', {
-    studentId,
-    year,
-    month,
-    paid,
-    paymentDate,
-    notes,
-    password
-  });
-  return response.data;
-};
+// Export attendance as CSV
+export const exportAttendanceCSV = (year, month) =>
+  api.get('/attendance/export', { params: { year, month }, responseType: 'blob' });
 
 // ==================== SUBJECT-BASED TUITION API ====================
 
@@ -300,6 +303,12 @@ export const getClassCountRange = async (startDate, endDate, statuses = [], teac
   });
   return response.data;
 };
+
+// ==================== TEACHER DASHBOARD API ====================
+
+// Get teacher schedule for a date
+export const getTeacherSchedule = (teacherName, date) =>
+  api.get('/attendance/teacher-schedule', { params: { teacher: teacherName, date } }).then(r => r.data);
 
 // ==================== HIDDEN ROWS API ====================
 
