@@ -236,6 +236,7 @@ function AttendanceSummary({ students, attendance, holidays, year, month, isLoad
                   {row.korean_name && (
                     <div className="text-xs text-gray-500">{row.korean_name}</div>
                   )}
+                  <div className="text-[10px] text-gray-400">ID: {row.id}</div>
                 </td>
                 <td className="px-4 py-2 text-gray-600">{row.subject || '-'}</td>
                 <td className="px-4 py-2 text-gray-600">{row.teacher_name || '-'}</td>
