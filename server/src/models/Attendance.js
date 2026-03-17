@@ -63,41 +63,22 @@ class Attendance {
     });
     return remap;
   }
-  // Get all active students directly from the shared database with their subjects/schedules
+  // Get students with active assignments from the shared database
+  // Only returns students that have at least one active assignment (class)
   // Returns one row per student-subject combination (students with multiple subjects get multiple rows)
   // If year and month are provided, filters hidden rows based on hidden_from date
   static async getStudentsWithClasses(year = null, month = null) {
     try {
-      // Try to use the pre-computed cache first (much faster than the 5-table join)
-      try {
-        const cacheCheck = await pool.query(
-          `SELECT COUNT(*) as count, MAX(refreshed_at) as last_refresh FROM student_schedule_cache`
-        );
-        if (parseInt(cacheCheck.rows[0].count) > 0) {
-          return await this._getStudentsFromCache(year, month);
-        }
-      } catch (e) {
-        // Cache table doesn't exist yet, fall through to live query
-      }
-
-      // Fallback: Run all 3 queries in parallel: students, subjects+schedules, tuition subjects
-      const [studentsResult, subjectsResult, tuitionSubjectsResult] = await Promise.all([
-        // 1. Get all active students directly from shared DB (replaces HTTP call)
-        pool.query(
-          `SELECT DISTINCT ON (
-             COALESCE(notion_page_id, LOWER(name) || '::' || COALESCE(korean_name, ''))
-           ) id, name, korean_name, english_name, color_keyword, is_active
-           FROM students
-           WHERE is_active = true
-           ORDER BY COALESCE(notion_page_id, LOWER(name) || '::' || COALESCE(korean_name, '')),
-                    (CASE WHEN first_start_date IS NOT NULL THEN 0 ELSE 1 END),
-                    id ASC`
-        ),
-        // 2. Get all student-subject-schedule combos
+      // Run 2 queries in parallel: student-subject-schedule combos, tuition subjects
+      const [subjectsResult, tuitionSubjectsResult] = await Promise.all([
+        // 1. Get students with active assignments (only students with classes)
         pool.query(
           `SELECT
             s.id as student_id,
             s.name as student_name,
+            s.korean_name,
+            s.english_name,
+            s.color_keyword,
             a.subject,
             t.name as teacher_name,
             TO_CHAR(ts.start_time, 'HH:MI AM') as start_time,
@@ -117,14 +98,14 @@ class Attendance {
           LEFT JOIN assignment_teachers att ON att.assignment_id = a.id
           LEFT JOIN teachers t ON t.id = att.teacher_id
           WHERE a.is_active = true AND s.is_active = true
-          GROUP BY s.id, s.name, a.subject, t.name, ts.start_time, ts.end_time
+          GROUP BY s.id, s.name, s.korean_name, s.english_name, s.color_keyword,
+                   a.subject, t.name, ts.start_time, ts.end_time
           ORDER BY s.name, a.subject, ts.start_time`
         ),
-        // 3. Get additional subjects from tuition table
+        // 2. Get additional subjects from tuition table
         pool.query('SELECT DISTINCT student_id, subject FROM student_subject_tuition'),
       ]);
 
-      const students = studentsResult.rows;
       const dayNames = ['Su', 'M', 'T', 'W', 'Th', 'F', 'Sa'];
 
       // Helper function to merge consecutive time slots with the same days
@@ -150,10 +131,22 @@ class Attendance {
         return merged;
       };
 
-      // Build student subjects map from query results
+      // Build student info and subjects map from the assignment query
+      const studentInfoMap = {};
       let studentSubjectsMap = {};
 
       subjectsResult.rows.forEach(row => {
+        // Collect student info from the JOIN results
+        if (!studentInfoMap[row.student_id]) {
+          studentInfoMap[row.student_id] = {
+            id: row.student_id,
+            name: row.student_name,
+            korean_name: row.korean_name || null,
+            english_name: row.english_name,
+            color_keyword: row.color_keyword,
+          };
+        }
+
         if (!studentSubjectsMap[row.student_id]) {
           studentSubjectsMap[row.student_id] = [];
         }
@@ -190,11 +183,9 @@ class Attendance {
         });
       });
 
-      // Add tuition-only subjects
+      // Add tuition-only subjects (only for students who already have assignments)
       tuitionSubjectsResult.rows.forEach(row => {
-        if (!studentSubjectsMap[row.student_id]) {
-          studentSubjectsMap[row.student_id] = [];
-        }
+        if (!studentSubjectsMap[row.student_id]) return; // skip students without assignments
         const existingSubject = studentSubjectsMap[row.student_id].find(
           s => s.subject === row.subject
         );
@@ -210,44 +201,28 @@ class Attendance {
 
       // Build result: one row per student-subject combination
       const result = [];
-      students
-        .filter(s => s.is_active)
-        .forEach(student => {
-          const subjects = studentSubjectsMap[student.id];
-          if (subjects && subjects.length > 0) {
-            subjects.forEach(subjectInfo => {
-              const schedules = subjectInfo.schedules || [];
-              const formattedSchedules = schedules.map(s => ({ time: s.time, days: s.days }));
-              result.push({
-                id: student.id,
-                name: student.name,
-                korean_name: student.korean_name || null,
-                english_name: student.english_name,
-                color_keyword: student.color_keyword,
-                teacher_name: subjectInfo.teacher_name,
-                schedule_time: schedules.length > 0 ? schedules[0].time : null,
-                schedule_days: schedules.length > 0 ? schedules[0].days : null,
-                schedules: formattedSchedules,
-                subject: subjectInfo.subject,
-                row_key: `${student.id}-${subjectInfo.subject || 'default'}`
-              });
-            });
-          } else {
+      Object.values(studentInfoMap).forEach(student => {
+        const subjects = studentSubjectsMap[student.id];
+        if (subjects && subjects.length > 0) {
+          subjects.forEach(subjectInfo => {
+            const schedules = subjectInfo.schedules || [];
+            const formattedSchedules = schedules.map(s => ({ time: s.time, days: s.days }));
             result.push({
               id: student.id,
               name: student.name,
-              korean_name: student.korean_name || null,
+              korean_name: student.korean_name,
               english_name: student.english_name,
               color_keyword: student.color_keyword,
-              teacher_name: null,
-              schedule_time: null,
-              schedule_days: null,
-              schedules: [],
-              subject: null,
-              row_key: `${student.id}-default`
+              teacher_name: subjectInfo.teacher_name,
+              schedule_time: schedules.length > 0 ? schedules[0].time : null,
+              schedule_days: schedules.length > 0 ? schedules[0].days : null,
+              schedules: formattedSchedules,
+              subject: subjectInfo.subject,
+              row_key: `${student.id}-${subjectInfo.subject || 'default'}`
             });
-          }
-        });
+          });
+        }
+      });
 
       // Filter hidden rows in SQL when year/month provided, otherwise fetch all
       let hiddenRows = [];
@@ -288,54 +263,6 @@ class Attendance {
       console.error('Error fetching students:', error.message);
       throw new Error('Failed to fetch students from database.');
     }
-  }
-
-  // Fast path: read from pre-computed cache table
-  static async _getStudentsFromCache(year = null, month = null) {
-    const cacheResult = await pool.query(
-      `SELECT student_id as id, student_name as name, korean_name, english_name,
-              color_keyword, subject, teacher_name, schedule_time, schedule_days,
-              schedules, row_key
-       FROM student_schedule_cache
-       ORDER BY student_name, subject`
-    );
-
-    const result = cacheResult.rows.map(row => ({
-      id: row.id,
-      name: row.name,
-      korean_name: row.korean_name,
-      english_name: row.english_name,
-      color_keyword: row.color_keyword,
-      teacher_name: row.teacher_name,
-      schedule_time: row.schedule_time,
-      schedule_days: row.schedule_days,
-      schedules: typeof row.schedules === 'string' ? JSON.parse(row.schedules) : (row.schedules || []),
-      subject: row.subject,
-      row_key: row.row_key
-    }));
-
-    // Apply hidden row filtering
-    let hiddenRows = [];
-    try {
-      if (year && month) {
-        const viewDate = year * 12 + month;
-        const hiddenResult = await pool.query(
-          `SELECT student_id, subject FROM hidden_attendance_rows
-           WHERE (hidden_from_year IS NULL AND hidden_from_month IS NULL)
-              OR (hidden_from_year * 12 + hidden_from_month) <= $1`,
-          [viewDate]
-        );
-        hiddenRows = hiddenResult.rows;
-      } else {
-        const hiddenResult = await pool.query('SELECT student_id, subject FROM hidden_attendance_rows');
-        hiddenRows = hiddenResult.rows;
-      }
-    } catch (err) {
-      // Table may not exist
-    }
-
-    const hiddenSet = new Set(hiddenRows.map(h => `${h.student_id}-${h.subject}`));
-    return result.filter(student => !hiddenSet.has(`${student.id}-${student.subject}`));
   }
 
   // Get attendance records for a specific month
@@ -1216,6 +1143,54 @@ class Attendance {
         is_deleted = false,
         deleted_at = NULL,
         updated_at = CURRENT_TIMESTAMP
+    `;
+    const result = await pool.query(query, params);
+    return result.rowCount;
+  }
+
+  // Bulk soft-delete attendance for multiple student-subject entries on a given date
+  static async bulkDeleteAttendance(studentEntries, date) {
+    if (!studentEntries || studentEntries.length === 0) return 0;
+
+    const conditions = [];
+    const params = [date];
+    studentEntries.forEach((entry, i) => {
+      const sidIdx = i * 2 + 2;
+      const subIdx = i * 2 + 3;
+      conditions.push(`(student_id = $${sidIdx} AND subject IS NOT DISTINCT FROM $${subIdx})`);
+      params.push(entry.studentId, entry.subject || null);
+    });
+
+    const query = `
+      UPDATE attendance
+      SET is_deleted = true, deleted_at = NOW()
+      WHERE date = $1
+        AND is_deleted = false
+        AND (${conditions.join(' OR ')})
+    `;
+    const result = await pool.query(query, params);
+    return result.rowCount;
+  }
+
+  // Bulk undo soft-delete for multiple student-subject entries on a given date
+  static async bulkUndoDelete(studentEntries, date) {
+    if (!studentEntries || studentEntries.length === 0) return 0;
+
+    const conditions = [];
+    const params = [date];
+    studentEntries.forEach((entry, i) => {
+      const sidIdx = i * 2 + 2;
+      const subIdx = i * 2 + 3;
+      conditions.push(`(student_id = $${sidIdx} AND subject IS NOT DISTINCT FROM $${subIdx})`);
+      params.push(entry.studentId, entry.subject || null);
+    });
+
+    const query = `
+      UPDATE attendance
+      SET is_deleted = false, deleted_at = NULL
+      WHERE date = $1
+        AND is_deleted = true
+        AND (${conditions.join(' OR ')})
     `;
     const result = await pool.query(query, params);
     return result.rowCount;
