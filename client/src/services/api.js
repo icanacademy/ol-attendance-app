@@ -47,6 +47,18 @@ export const bulkSetAttendance = async (data) => {
   return response.data;
 };
 
+// Bulk delete attendance (soft delete) for multiple students on a specific date
+export const bulkDeleteAttendance = async (entries, date) => {
+  const response = await api.post('/attendance/bulk/delete', { entries, date });
+  return response.data;
+};
+
+// Bulk undo delete for multiple students on a specific date
+export const bulkUndoDelete = async (entries, date) => {
+  const response = await api.post('/attendance/bulk/undo', { entries, date });
+  return response.data;
+};
+
 // Toggle attendance status (with optional subject)
 export const toggleAttendance = async (studentId, date, subject = null) => {
   const response = await api.post('/attendance/toggle', {

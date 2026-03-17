@@ -86,6 +86,34 @@ exports.bulkSetAttendance = async (req, res) => {
   }
 };
 
+exports.bulkDeleteAttendance = async (req, res) => {
+  try {
+    const { entries, date } = req.body;
+    if (!entries || !Array.isArray(entries) || entries.length === 0 || !date) {
+      return res.status(400).json({ error: 'entries (non-empty array) and date are required' });
+    }
+    const count = await Attendance.bulkDeleteAttendance(entries, date);
+    res.json({ count });
+  } catch (error) {
+    console.error('Error bulk deleting attendance:', error);
+    res.status(500).json({ error: 'Failed to bulk delete attendance' });
+  }
+};
+
+exports.bulkUndoDelete = async (req, res) => {
+  try {
+    const { entries, date } = req.body;
+    if (!entries || !Array.isArray(entries) || entries.length === 0 || !date) {
+      return res.status(400).json({ error: 'entries (non-empty array) and date are required' });
+    }
+    const count = await Attendance.bulkUndoDelete(entries, date);
+    res.json({ count });
+  } catch (error) {
+    console.error('Error bulk undo delete:', error);
+    res.status(500).json({ error: 'Failed to bulk undo delete' });
+  }
+};
+
 // Toggle attendance status (with optional subject)
 exports.toggleAttendance = async (req, res) => {
   try {

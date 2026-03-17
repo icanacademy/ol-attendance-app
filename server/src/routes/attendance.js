@@ -27,6 +27,12 @@ router.get('/summary/:studentId', attendanceController.getStudentSummary);
 // Bulk set attendance
 router.post('/bulk', attendanceController.bulkSetAttendance);
 
+// Bulk delete attendance (soft delete)
+router.post('/bulk/delete', attendanceController.bulkDeleteAttendance);
+
+// Bulk undo delete
+router.post('/bulk/undo', attendanceController.bulkUndoDelete);
+
 // Set attendance
 router.post('/', attendanceController.setAttendance);
 

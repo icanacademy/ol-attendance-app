@@ -1,6 +1,6 @@
 import React, { useMemo, useState, useRef, useEffect, useCallback } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { setAttendance, deleteAttendance, undoDeleteAttendance, setNote, hideRow, exportAttendanceCSV, bulkSetAttendance } from '../services/api';
+import { setAttendance, deleteAttendance, undoDeleteAttendance, setNote, hideRow, exportAttendanceCSV, bulkSetAttendance, bulkDeleteAttendance, bulkUndoDelete } from '../services/api';
 
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
@@ -21,7 +21,7 @@ function AttendanceGrid({
   const [dropdown, setDropdown] = useState(null); // { studentId, dateStr, subject, x, y }
   const [editingNote, setEditingNote] = useState({}); // { rowKey: noteText }
   const dropdownRef = useRef(null);
-  const [undoToast, setUndoToast] = useState(null); // { studentId, date, subject, status, studentName }
+  const [undoToast, setUndoToast] = useState(null); // { studentId, date, subject, status, studentName } or { bulk: true, entries, date, count }
   const undoTimerRef = useRef(null);
 
   // Close dropdown when clicking outside
@@ -293,14 +293,48 @@ function AttendanceGrid({
     }
   });
 
+  // Bulk set attendance mutation - marks all visible scheduled students present for a day
+  const bulkMutation = useMutation({
+    mutationFn: ({ entries, date, status }) => bulkSetAttendance({ entries, date, status }),
+    onSuccess: (data, variables) => {
+      queryClient.invalidateQueries(['attendance', year, month]);
+      setUndoToast({
+        bulk: true,
+        entries: variables.entries,
+        date: variables.date,
+        count: data.count || variables.entries.length
+      });
+    }
+  });
+
+  // Bulk undo mutation - soft-deletes the records that were just bulk-set
+  const bulkUndoMutation = useMutation({
+    mutationFn: ({ entries, date }) => bulkDeleteAttendance(entries, date),
+    onSuccess: () => {
+      queryClient.invalidateQueries(['attendance', year, month]);
+      setUndoToast(null);
+      clearTimeout(undoTimerRef.current);
+    },
+    onError: () => {
+      setUndoToast(null);
+    }
+  });
+
   const handleUndo = useCallback(() => {
     if (!undoToast) return;
-    undoMutation.mutate({
-      studentId: undoToast.studentId,
-      date: undoToast.date,
-      subject: undoToast.subject
-    });
-  }, [undoToast, undoMutation]);
+    if (undoToast.bulk) {
+      bulkUndoMutation.mutate({
+        entries: undoToast.entries,
+        date: undoToast.date
+      });
+    } else {
+      undoMutation.mutate({
+        studentId: undoToast.studentId,
+        date: undoToast.date,
+        subject: undoToast.subject
+      });
+    }
+  }, [undoToast, undoMutation, bulkUndoMutation]);
 
   // Set note mutation (now includes subject)
   const noteMutation = useMutation({
@@ -316,14 +350,6 @@ function AttendanceGrid({
     onSuccess: () => {
       // Refetch students to update the list
       queryClient.invalidateQueries(['students', year, month]);
-    }
-  });
-
-  // Bulk set attendance mutation - marks all visible scheduled students present for a day
-  const bulkMutation = useMutation({
-    mutationFn: ({ entries, date, status }) => bulkSetAttendance({ entries, date, status }),
-    onSuccess: () => {
-      queryClient.invalidateQueries(['attendance', year, month]);
     }
   });
 
@@ -570,15 +596,6 @@ function AttendanceGrid({
                 >
                   <div className="font-semibold">{day.day}</div>
                   <div className={`text-[10px] ${inRange ? '' : day.isToday ? 'text-amber-800' : ''}`} title={holiday ? getHolidayName(day.dateStr) : ''}>{holiday ? 'H' : day.dayName}</div>
-                  {!holiday && !isSelectingRange && (
-                    <button
-                      onClick={(e) => { e.stopPropagation(); handleBulkPresent(day.dateStr); }}
-                      className="mt-0.5 w-5 h-5 rounded bg-green-500 hover:bg-green-600 text-white text-[10px] leading-none flex items-center justify-center mx-auto transition-colors"
-                      title={`Mark all scheduled students present on ${day.dateStr}`}
-                    >
-                      ✓
-                    </button>
-                  )}
                 </th>
               );
             })}
@@ -786,14 +803,17 @@ function AttendanceGrid({
       {undoToast && (
         <div className="fixed bottom-6 left-1/2 transform -translate-x-1/2 z-50 bg-gray-800 text-white px-5 py-3 rounded-lg shadow-lg flex items-center gap-4 animate-fade-in">
           <span className="text-sm">
-            Cleared <strong>{undoToast.status.toUpperCase()}</strong> for {undoToast.studentName}{undoToast.subject ? ` (${undoToast.subject})` : ''} on {undoToast.date}
+            {undoToast.bulk
+              ? <>Marked <strong>{undoToast.count}</strong> students present on {undoToast.date}</>
+              : <>Cleared <strong>{undoToast.status.toUpperCase()}</strong> for {undoToast.studentName}{undoToast.subject ? ` (${undoToast.subject})` : ''} on {undoToast.date}</>
+            }
           </span>
           <button
             onClick={handleUndo}
-            disabled={undoMutation.isLoading}
+            disabled={undoMutation.isLoading || bulkUndoMutation.isLoading}
             className="px-3 py-1 bg-blue-500 hover:bg-blue-600 text-white text-sm font-medium rounded transition-colors disabled:opacity-50"
           >
-            {undoMutation.isLoading ? 'Undoing...' : 'Undo'}
+            {(undoMutation.isLoading || bulkUndoMutation.isLoading) ? 'Undoing...' : 'Undo'}
           </button>
           <button
             onClick={() => { setUndoToast(null); clearTimeout(undoTimerRef.current); }}
