@@ -25,6 +25,9 @@ const poolConfig = process.env.DATABASE_URL
       database: process.env.DB_NAME || 'scheduling_db',
       user: process.env.DB_USER || 'postgres',
       password: process.env.DB_PASSWORD || 'postgres',
+      max: 10,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 5000,
     };
 
 const pool = new Pool(poolConfig);

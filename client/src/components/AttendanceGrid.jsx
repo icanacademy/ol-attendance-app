@@ -619,7 +619,7 @@ function AttendanceGrid({
                   {student.english_name && (
                     <div className="text-xs text-gray-500">{student.english_name}</div>
                   )}
-                  <div className="text-[10px] text-gray-400">ID: {student.id}</div>
+                  <div className="text-[10px] text-gray-400">{student.notion_student_id ? `ICN-OST-${student.notion_student_id}` : `ID: ${student.id}`}</div>
                 </td>
                 {/* Teacher */}
                 <td className="hidden md:table-cell px-3 py-2 text-sm border-b text-gray-700">

@@ -37,17 +37,26 @@ class Attendance {
   static async _getIdRemapTable() {
     const result = await pool.query(`
       WITH canonical AS (
+        -- Pick the canonical ID for each student identity:
+        -- Prefer IDs that have active assignments, then active students, then highest ID
         SELECT DISTINCT ON (
-          COALESCE(notion_page_id, LOWER(name) || '::' || COALESCE(korean_name, ''))
-        ) id as canonical_id,
-        COALESCE(notion_page_id, LOWER(name) || '::' || COALESCE(korean_name, '')) as identity_key
-        FROM students
-        WHERE is_active = true
-        ORDER BY COALESCE(notion_page_id, LOWER(name) || '::' || COALESCE(korean_name, '')),
-                 (CASE WHEN first_start_date IS NOT NULL THEN 0 ELSE 1 END),
-                 id ASC
+          COALESCE(s.notion_page_id, LOWER(s.name) || '::' || COALESCE(s.korean_name, ''))
+        ) s.id as canonical_id,
+        COALESCE(s.notion_page_id, LOWER(s.name) || '::' || COALESCE(s.korean_name, '')) as identity_key
+        FROM students s
+        LEFT JOIN (
+          SELECT DISTINCT ast2.student_id
+          FROM assignment_students ast2
+          JOIN assignments a2 ON a2.id = ast2.assignment_id AND a2.is_active = true
+        ) active_ast ON active_ast.student_id = s.id
+        ORDER BY COALESCE(s.notion_page_id, LOWER(s.name) || '::' || COALESCE(s.korean_name, '')),
+                 (CASE WHEN active_ast.student_id IS NOT NULL THEN 0 ELSE 1 END),
+                 (CASE WHEN s.is_active THEN 0 ELSE 1 END),
+                 s.id ASC
       ),
       all_ids AS (
+        -- Include ALL student IDs (active and inactive) so attendance records
+        -- from old/deactivated student records can be remapped to canonical IDs
         SELECT id,
           COALESCE(notion_page_id, LOWER(name) || '::' || COALESCE(korean_name, '')) as identity_key
         FROM students
@@ -74,11 +83,12 @@ class Attendance {
         // 1. Get students with active assignments (only students with classes)
         pool.query(
           `SELECT
-            s.id as student_id,
+            MIN(s.id) as student_id,
+            MAX(s.student_id) as notion_student_id,
             s.name as student_name,
             s.korean_name,
-            s.english_name,
-            s.color_keyword,
+            MAX(s.english_name) as english_name,
+            MAX(s.color_keyword) as color_keyword,
             a.subject,
             t.name as teacher_name,
             TO_CHAR(ts.start_time, 'HH:MI AM') as start_time,
@@ -98,7 +108,7 @@ class Attendance {
           LEFT JOIN assignment_teachers att ON att.assignment_id = a.id
           LEFT JOIN teachers t ON t.id = att.teacher_id
           WHERE a.is_active = true AND s.is_active = true
-          GROUP BY s.id, s.name, s.korean_name, s.english_name, s.color_keyword,
+          GROUP BY s.name, s.korean_name,
                    a.subject, t.name, ts.start_time, ts.end_time
           ORDER BY s.name, a.subject, ts.start_time`
         ),
@@ -140,6 +150,7 @@ class Attendance {
         if (!studentInfoMap[row.student_id]) {
           studentInfoMap[row.student_id] = {
             id: row.student_id,
+            notion_student_id: row.notion_student_id || null,
             name: row.student_name,
             korean_name: row.korean_name || null,
             english_name: row.english_name,
@@ -209,6 +220,7 @@ class Attendance {
             const formattedSchedules = schedules.map(s => ({ time: s.time, days: s.days }));
             result.push({
               id: student.id,
+              notion_student_id: student.notion_student_id,
               name: student.name,
               korean_name: student.korean_name,
               english_name: student.english_name,

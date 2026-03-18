@@ -380,9 +380,7 @@ exports.addHoliday = async (req, res) => {
   try {
     const { date, name, password } = req.body;
 
-    if (password !== ADMIN_PASSWORD) {
-      return res.status(401).json({ error: 'Invalid admin password' });
-    }
+    // Auth handled by requireAdmin middleware
 
     if (!date) {
       return res.status(400).json({ error: 'Date is required' });
@@ -402,9 +400,7 @@ exports.deleteHoliday = async (req, res) => {
     const { id } = req.params;
     const { password } = req.body;
 
-    if (password !== ADMIN_PASSWORD) {
-      return res.status(401).json({ error: 'Invalid admin password' });
-    }
+    // Auth handled by requireAdmin middleware
 
     const deleted = await Attendance.deleteHoliday(parseInt(id));
 
@@ -457,9 +453,7 @@ exports.setTeacherCommission = async (req, res) => {
   try {
     const { teacherId, studentId, commissionPerClass, currency, password } = req.body;
 
-    if (password !== ADMIN_PASSWORD) {
-      return res.status(401).json({ error: 'Invalid admin password' });
-    }
+    // Auth handled by requireAdmin middleware
 
     if (!teacherId || !studentId || commissionPerClass === undefined) {
       return res.status(400).json({ error: 'teacherId, studentId, and commissionPerClass are required' });
@@ -487,9 +481,7 @@ exports.toggleTeacherPayment = async (req, res) => {
   try {
     const { teacherId, studentId, year, month, password } = req.body;
 
-    if (password !== ADMIN_PASSWORD) {
-      return res.status(401).json({ error: 'Invalid admin password' });
-    }
+    // Auth handled by requireAdmin middleware
 
     if (!teacherId || !studentId || !year || !month) {
       return res.status(400).json({ error: 'teacherId, studentId, year, and month are required' });
@@ -541,14 +533,10 @@ exports.getStudentsWithSubjectTuition = async (req, res) => {
   }
 };
 
-// Set subject tuition for a student (admin only)
+// Set subject tuition for a student (admin only - auth handled by requireAdmin middleware)
 exports.setSubjectTuition = async (req, res) => {
   try {
-    const { studentId, subject, pricePerClass, currency, password } = req.body;
-
-    if (password !== ADMIN_PASSWORD) {
-      return res.status(401).json({ error: 'Invalid admin password' });
-    }
+    const { studentId, subject, pricePerClass, currency } = req.body;
 
     if (!studentId || !subject || pricePerClass === undefined) {
       return res.status(400).json({ error: 'studentId, subject, and pricePerClass are required' });
@@ -576,9 +564,7 @@ exports.toggleSubjectPayment = async (req, res) => {
   try {
     const { studentId, subject, year, month, password } = req.body;
 
-    if (password !== ADMIN_PASSWORD) {
-      return res.status(401).json({ error: 'Invalid admin password' });
-    }
+    // Auth handled by requireAdmin middleware
 
     if (!studentId || !subject || !year || !month) {
       return res.status(400).json({ error: 'studentId, subject, year, and month are required' });
@@ -602,9 +588,7 @@ exports.addStudentSubject = async (req, res) => {
   try {
     const { studentId, subject, password } = req.body;
 
-    if (password !== ADMIN_PASSWORD) {
-      return res.status(401).json({ error: 'Invalid admin password' });
-    }
+    // Auth handled by requireAdmin middleware
 
     if (!studentId || !subject) {
       return res.status(400).json({ error: 'studentId and subject are required' });
@@ -624,9 +608,7 @@ exports.deleteStudentSubject = async (req, res) => {
     const { studentId, subject } = req.query;
     const { password } = req.body;
 
-    if (password !== ADMIN_PASSWORD) {
-      return res.status(401).json({ error: 'Invalid admin password' });
-    }
+    // Auth handled by requireAdmin middleware
 
     if (!studentId || !subject) {
       return res.status(400).json({ error: 'studentId and subject are required' });

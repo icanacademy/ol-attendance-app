@@ -6,6 +6,19 @@ const api = axios.create({
   baseURL: API_BASE,
 });
 
+// Clear stale admin token on 401 responses
+api.interceptors.response.use(
+  response => response,
+  error => {
+    if (error.response?.status === 401 && api.defaults.headers.common['Authorization']) {
+      // Token is invalid/expired — clear it so user gets prompted to re-login
+      localStorage.removeItem('admin_token');
+      delete api.defaults.headers.common['Authorization'];
+    }
+    return Promise.reject(error);
+  }
+);
+
 // Warm up the API to reduce cold start delays
 export const warmupApi = () => {
   api.get('/health').catch(() => {});

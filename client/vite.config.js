@@ -8,9 +8,11 @@ export default defineConfig(({ mode }) => {
     plugins: [react()],
     server: {
       port: 5174,
+      host: '0.0.0.0',
+      allowedHosts: ['onlineattendance.icanacademy.work'],
       proxy: {
         '/api': {
-          target: env.VITE_API_URL || 'http://localhost:5001',
+          target: env.VITE_PROXY_TARGET || 'http://localhost:5001',
           changeOrigin: true
         }
       }
